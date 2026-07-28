@@ -94,6 +94,10 @@ function auth(req, res, next) {
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 app.post("/api/login", (req, res) => {
   const user = db.users.find(x => x.email.toLowerCase() === String(req.body.email || "").toLowerCase() && x.passwordHash === hash(String(req.body.password || "")) && x.active);
   if (!user) return res.status(401).json({ error: "Email or password is incorrect." });

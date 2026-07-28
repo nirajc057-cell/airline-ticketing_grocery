@@ -1,0 +1,10 @@
+.git
+.gitignore
+node_modules
+npm-debug.log*
+.env
+.env.*
+data/store.json
+README.md
+start.bat
+test.js
