@@ -1,0 +1,8 @@
+.close-nav,.nav-backdrop{display:none}
+@media(max-width:760px){
+  aside{transition:transform .22s ease!important;box-shadow:8px 0 30px #0004}
+  aside.open{transform:translateX(0)!important}
+  .close-nav{display:block;position:absolute;right:12px;top:8px;border:0;background:transparent;color:#fff;font-size:30px;cursor:pointer}
+  .nav-backdrop{display:block;position:fixed;inset:0;background:#07130e99;z-index:25;opacity:0;visibility:hidden;transition:.22s}
+  .nav-backdrop.open{opacity:1;visibility:visible}
+}
