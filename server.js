@@ -142,7 +142,16 @@ function financeSummary(from="0000-01-01",to="9999-12-31"){
   return {openingBalance:opening,closingBalance:running,walletRows,ledgerRows,receivables,payables};
 }
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use((req,res,next)=>{
+  if(req.path==="/"||req.path==="/grocery.html"||/\.(?:js|css|html)$/.test(req.path)){
+    res.set("Cache-Control","no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma","no-cache");
+    res.set("Expires","0");
+    res.set("Surrogate-Control","no-store");
+  }
+  next();
+});
+app.use(express.static(path.join(__dirname, "public"),{etag:false,lastModified:false,maxAge:0}));
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok" });
