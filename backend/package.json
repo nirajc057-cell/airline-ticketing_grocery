@@ -1,0 +1,9 @@
+{
+  "name": "aerodesk-sql-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Windows npm shortcut for the Dart/PostgreSQL backend",
+  "scripts": {
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File ./bin/start_local.ps1"
+  }
+}

@@ -1,0 +1,11 @@
+name: aerodesk_backend
+description: Local PostgreSQL API for AeroDesk and FreshMart Flutter clients.
+publish_to: none
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+dependencies:
+  crypto: ^3.0.6
+  postgres: ^3.5.7
+  shelf: ^1.4.2
+dev_dependencies:
+  test: ^1.25.15

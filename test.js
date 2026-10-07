@@ -1,8 +1,21 @@
 const assert=require("assert");
 const {spawn}=require("child_process");
-const server=spawn(process.execPath,["server.js"],{cwd:__dirname,stdio:"ignore"});
+const fs=require("fs"),os=require("os"),path=require("path");
+const testDataDir=fs.mkdtempSync(path.join(os.tmpdir(),"aerodesk-test-"));
+const testPort=40000+Math.floor(Math.random()*20000);
+const testDatabaseUrl=process.env.TEST_DATABASE_URL||"";
+if(testDatabaseUrl){
+  const parsed=new URL(testDatabaseUrl);
+  if(!["localhost","127.0.0.1"].includes(parsed.hostname)||!parsed.pathname.endsWith("_test")){
+    throw Error("TEST_DATABASE_URL must use localhost and a database name ending in _test.");
+  }
+}
+const actualFetch=global.fetch;
+global.fetch=(url,options)=>actualFetch(typeof url==="string"?url.replace("http://localhost:4782",`http://localhost:${testPort}`):url,options);
+const server=spawn(process.execPath,["server.js"],{cwd:__dirname,stdio:["ignore","ignore","pipe"],env:{...process.env,NODE_ENV:"test",PORT:String(testPort),DATA_DIR:testDataDir,STORAGE_DRIVER:testDatabaseUrl?"postgres":"json-test",DATABASE_URL:testDatabaseUrl}});
+let serverErrors="";server.stderr.on("data",chunk=>serverErrors=(serverErrors+chunk.toString()).slice(-4000));
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-const waitForServer=async()=>{for(let attempt=0;attempt<30;attempt++){try{const response=await fetch("http://localhost:4782/health");if(response.ok)return}catch{}await wait(200)}throw Error("Server did not become ready.")};
+const waitForServer=async()=>{for(let attempt=0;attempt<50;attempt++){try{const response=await fetch("http://localhost:4782/health");if(response.ok)return}catch{}if(server.exitCode!==null)break;await wait(200)}throw Error(`Server did not become ready. ${serverErrors}`)};
 (async()=>{try{
   await waitForServer();
   const login=await fetch("http://localhost:4782/api/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({email:"owner@aerodesk.local",password:"AeroDesk2026!"})});
@@ -29,4 +42,4 @@ const waitForServer=async()=>{for(let attempt=0;attempt<30;attempt++){try{const 
   const ready=await fetch(`http://localhost:4782/api/passports/${passport.id}`,{method:"PATCH",headers,body:JSON.stringify({status:"Ready for collection",newPassportNumber:"PA654321",newExpiry:"2036-11-01"})});assert.equal(ready.status,200);
   const collected=await fetch(`http://localhost:4782/api/passports/${passport.id}`,{method:"PATCH",headers,body:JSON.stringify({status:"Collected",collectionDate:"2026-11-16",collectionMethod:"Self collection",collectorName:"Profile Test",collectorRelation:"Self",collectorPhone:"+9779800000000",collectorIdType:"Citizenship",collectorId:"ID-123",deliveredBy:"Nischal Chaudhary",documentCondition:"Received in good condition",collectionNote:"Identity verified"})});assert.equal(collected.status,200);const collection=await collected.json();assert.equal(collection.status,"Collected");assert.equal(collection.collectorName,"Profile Test");assert.equal(collection.collectionMethod,"Self collection");assert.equal(collection.documentCondition,"Received in good condition");
   console.log("PASS: core operations, finance and passport collection");
-}catch(e){console.error("FAIL:",e);process.exitCode=1}finally{server.kill()}})();
+}catch(e){console.error("FAIL:",e);process.exitCode=1}finally{server.once("exit",()=>fs.rmSync(testDataDir,{recursive:true,force:true}));server.kill()}})();

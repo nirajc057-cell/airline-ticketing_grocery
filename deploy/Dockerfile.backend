@@ -1,0 +1,19 @@
+FROM dart:stable AS build
+
+WORKDIR /app
+COPY backend/pubspec.yaml backend/pubspec.lock ./
+RUN dart pub get
+COPY backend/bin ./bin
+COPY backend/lib ./lib
+RUN dart compile exe bin/server.dart -o /app/aerodesk-api
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /app/aerodesk-api ./aerodesk-api
+ENV API_HOST=0.0.0.0 \
+    API_PORT=4783
+USER 65532:65532
+EXPOSE 4783
+CMD ["/app/aerodesk-api"]

@@ -4,3 +4,7 @@ node_modules/
 *.log
 .server.pid
 data/store.json
+.local-postgres/
+.local-backups/
+backend/.local-login.txt
+test.txt

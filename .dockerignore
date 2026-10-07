@@ -5,6 +5,13 @@ npm-debug.log*
 .env
 .env.*
 data/store.json
+.local-postgres
+.local-backups
+backend/.local-login.txt
+test.txt
 README.md
 start.bat
 test.js
+flutter_app/.dart_tool
+flutter_app/build
+flutter_app/.flutter-plugins-dependencies

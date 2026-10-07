@@ -1,0 +1,22 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set the private PostgreSQL connection in Coolify}
+      API_HOST: 0.0.0.0
+      API_PORT: 4783
+    restart: unless-stopped
+    expose:
+      - "4783"
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    depends_on:
+      - api
+    restart: unless-stopped
+    expose:
+      - "80"

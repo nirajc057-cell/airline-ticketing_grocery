@@ -2,10 +2,11 @@ const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { openPersistence } = require("./backend/persistence");
 
 const app = express();
 const PORT = Number(process.env.PORT || 4782);
-const dataDir = path.join(__dirname, "data");
+const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, "data");
 const dataFile = path.join(dataDir, "store.json");
 const sessions = new Map();
 const now = () => new Date().toISOString();
@@ -77,12 +78,9 @@ function grocerySeed(){
     audit:[{id:"GA-001",action:"GROCERY_PLATFORM_CREATED",detail:"Local grocery workspace initialized",createdAt:now()}]
   }
 }
-function load() {
-  fs.mkdirSync(dataDir, { recursive: true });
-  if (!fs.existsSync(dataFile)) fs.writeFileSync(dataFile, JSON.stringify(seed(), null, 2));
-  return JSON.parse(fs.readFileSync(dataFile, "utf8"));
-}
-let db = load();
+async function start() {
+const storage = await openPersistence({ dataFile, seed });
+let db = storage.data;
 if(!db.grocery){db.grocery=grocerySeed();save()}
 if(db.grocery.settings.currency==="USD")db.grocery.settings.currency="NPR";
 for(const purchase of db.grocery.purchases){purchase.items||=[];purchase.payments||=[];purchase.history||=[];purchase.paidAmount=Number(purchase.paidAmount||0);purchase.outstanding=Number(purchase.outstanding??purchase.total);purchase.paymentStatus||=purchase.outstanding<.01?"Paid":"Unpaid";purchase.receivingStatus||=purchase.status==="Received"?"Received":"Not received";purchase.poNumber||=purchase.id}
@@ -110,7 +108,7 @@ db.finance.settings ||= {
 };
 for(const entry of db.ledger){entry.status||="Posted";entry.currency||=db.finance.settings.baseCurrency;entry.exchangeRate||=1;entry.createdBy||="System";entry.createdAt||=`${entry.date}T00:00:00.000Z`;entry.category||="Uncategorized"}
 for(const movement of db.walletTransactions){movement.currency||=db.finance.settings.baseCurrency;movement.exchangeRate||=1;movement.paymentMethod||="Agency wallet";movement.createdBy||="System";movement.createdAt||=`${movement.date}T00:00:00.000Z`}
-function save() { fs.writeFileSync(dataFile, JSON.stringify(db, null, 2)); }
+function save() { storage.queueSave(db); }
 function audit(req, action, entity, detail) {
   db.audit.unshift({ id: id("AU"), action, user: req.user?.name || "System", entity, detail, createdAt: now() });
   db.audit = db.audit.slice(0, 5000);
@@ -142,8 +140,19 @@ function financeSummary(from="0000-01-01",to="9999-12-31"){
   return {openingBalance:opening,closingBalance:running,walletRows,ledgerRows,receivables,payables};
 }
 app.use(express.json({ limit: "1mb" }));
+app.use((req, res, next) => {
+  const sendJson = res.json.bind(res);
+  res.json = body => {
+    storage.flush().then(() => sendJson(body)).catch(error => {
+      console.error('Persistence failed:', error);
+      if (!res.headersSent) sendJson.call(res.status(503), { error: 'Database storage is unavailable. No changes were confirmed.' });
+    });
+    return res;
+  };
+  next();
+});
 app.use((req,res,next)=>{
-  if(req.path==="/"||req.path==="/grocery.html"||/\.(?:js|css|html)$/.test(req.path)){
+  if(req.path==="/"||req.path==="/grocery.html"||req.path.startsWith("/flutter")||/\.(?:js|css|html)$/.test(req.path)){
     res.set("Cache-Control","no-store, no-cache, must-revalidate, proxy-revalidate");
     res.set("Pragma","no-cache");
     res.set("Expires","0");
@@ -151,10 +160,23 @@ app.use((req,res,next)=>{
   }
   next();
 });
+const flutterWebDir=path.join(__dirname,"flutter_app","build","web");
+app.get("/flutter",(req,res,next)=>req.path==="/flutter"?res.redirect(308,"/flutter/"):next());
+app.use("/flutter",express.static(flutterWebDir,{etag:false,lastModified:false,maxAge:0}));
+app.get("/flutter/*",(_req,res)=>{
+  const indexFile=path.join(flutterWebDir,"index.html");
+  if(!fs.existsSync(indexFile))return res.status(404).send("Build the Flutter web client first: flutter build web --base-href /flutter/");
+  res.sendFile(indexFile);
+});
 app.use(express.static(path.join(__dirname, "public"),{etag:false,lastModified:false,maxAge:0}));
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "ok" });
+app.get("/health", async (_req, res) => {
+  try {
+    await storage.ping();
+    res.status(200).json({ status: "ok", storage: storage.driver });
+  } catch (error) {
+    res.status(503).json({ status: "unavailable", storage: storage.driver });
+  }
 });
 
 app.post("/api/login", (req, res) => {
@@ -429,5 +451,8 @@ app.get("/api/reports/sales",auth,(req,res)=>{
   res.json({rows,totals:rows.reduce((a,x)=>({sales:a.sales+x.sales,cost:a.cost+x.cost,revenue:a.revenue+x.revenue}),{sales:0,cost:0,revenue:0})});
 });
 app.get("*",(req,res)=>res.sendFile(path.join(__dirname,"public","index.html")));
-app.listen(PORT,()=>console.log(`AeroDesk Local running at http://localhost:${PORT}`));
+await storage.flush();
+app.listen(PORT,()=>console.log(`AeroDesk Local running at http://localhost:${PORT} (${storage.driver} storage)`));
+}
+start().catch(error => { console.error('Unable to start AeroDesk:', error); process.exitCode = 1; });
 module.exports=app;
