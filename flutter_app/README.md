@@ -148,10 +148,13 @@ The local development API uses HTTP; mobile release builds must use HTTPS.
 ## Build iOS with Codemagic
 
 Connect the GitHub repository in Codemagic and select the
-`flutter-dart-sql-staging-20261007` branch. This repository is a monorepo: set
-the Flutter project path to `flutter_app`, not the repository root. In the
-Flutter workflow editor, select iOS and add this build argument so the app
-connects to the deployed API instead of a local server:
+`flutter-dart-sql-staging-20261007` branch, not `main`. The root
+`codemagic.yaml` provides an `ios-simulator-preview` workflow that builds an
+unsigned `.app` for simulator testing without an Apple Developer account.
+Choose that branch, click **Check for configuration files**, then start the
+workflow manually. The project is in `flutter_app`; the workflow already
+sets its working directory and passes this build argument so the app connects
+to the deployed API instead of a local server:
 
 ```text
 --dart-define=API_BASE_URL=https://p3yjd28yiyes6xkoq32uwwf2.mbsoftech.com.np
@@ -161,9 +164,10 @@ The iOS project currently has the placeholder bundle ID
 `com.example.aerodeskClient`. Choose a permanent, unique bundle ID before
 configuring signing. An Apple Developer Program membership and iOS code
 signing are required for an installable IPA or TestFlight/App Store release;
-an unsigned build is only a compilation check. Configure signing credentials
-in Codemagic, never in Git. iOS builds cannot be verified on this Windows
-machine, so run and test the iOS workflow on Codemagic's macOS builder.
+the simulator `.app` cannot be installed on a physical iPhone. Configure
+signing credentials in Codemagic, never in Git. iOS builds cannot be verified
+on this Windows machine, so run and test the iOS workflow on Codemagic's macOS
+builder.
 
 The app contains responsive screens for travel and grocery modules. Some
 specialized workflows (authenticator setup, uploads, exports/printing and

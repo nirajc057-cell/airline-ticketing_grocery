@@ -1,0 +1,18 @@
+workflows:
+  ios-simulator-preview:
+    name: AeroDesk iOS simulator preview (no Apple signing)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    working_directory: flutter_app
+    environment:
+      flutter: 3.29.2
+      xcode: 16.2
+      cocoapods: default
+    scripts:
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Build iOS simulator app
+        script: flutter build ios --simulator --debug --dart-define=API_BASE_URL=https://p3yjd28yiyes6xkoq32uwwf2.mbsoftech.com.np
+    artifacts:
+      - flutter_app/build/ios/iphonesimulator/*.app
+      - /tmp/xcodebuild_logs/*.log
