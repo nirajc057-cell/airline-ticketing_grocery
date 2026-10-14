@@ -145,6 +145,26 @@ on macOS with Xcode, and Linux on Linux with the Flutter desktop prerequisites.
 Android release signing and app IDs must be configured before distribution.
 The local development API uses HTTP; mobile release builds must use HTTPS.
 
+## Build iOS with Codemagic
+
+Connect the GitHub repository in Codemagic and select the
+`flutter-dart-sql-staging-20261007` branch. This repository is a monorepo: set
+the Flutter project path to `flutter_app`, not the repository root. In the
+Flutter workflow editor, select iOS and add this build argument so the app
+connects to the deployed API instead of a local server:
+
+```text
+--dart-define=API_BASE_URL=https://p3yjd28yiyes6xkoq32uwwf2.mbsoftech.com.np
+```
+
+The iOS project currently has the placeholder bundle ID
+`com.example.aerodeskClient`. Choose a permanent, unique bundle ID before
+configuring signing. An Apple Developer Program membership and iOS code
+signing are required for an installable IPA or TestFlight/App Store release;
+an unsigned build is only a compilation check. Configure signing credentials
+in Codemagic, never in Git. iOS builds cannot be verified on this Windows
+machine, so run and test the iOS workflow on Codemagic's macOS builder.
+
 The app contains responsive screens for travel and grocery modules. Some
 specialized workflows (authenticator setup, uploads, exports/printing and
 complete financial statements) are still being migrated from the old app.
