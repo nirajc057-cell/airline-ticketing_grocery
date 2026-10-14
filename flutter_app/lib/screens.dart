@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'api.dart';
 import 'booking_form_fields.dart';
 import 'form_sheet.dart';
@@ -8,6 +9,14 @@ import 'named_table_repository.dart';
 import 'payment_dialog.dart';
 import 'transactions.dart';
 import 'travel_ui.dart';
+
+class _RecordTableMeta {
+  _RecordTableMeta(this.fields, this.columnOrder, this.rowOrder, this.revision);
+  final List<FieldSpec> fields;
+  List<String> columnOrder;
+  List<String> rowOrder;
+  int revision;
+}
 
 class ModuleScreen extends StatefulWidget {
   const ModuleScreen({
@@ -41,6 +50,24 @@ class _ModuleScreenState extends State<ModuleScreen> {
   String financeType = '';
   String financeSearch = '';
   String financeSection = 'Wallet movements';
+  Future<_RecordTableMeta>? _tableMetaFuture;
+  bool _rearrangingTable = false;
+  bool _savingTableLayout = false;
+  String? _editingRecordId;
+  String? _editingFieldKey;
+  final _cellEditor = TextEditingController();
+  final _tableHorizontal = ScrollController();
+  final _tableVertical = ScrollController();
+  Timer? _searchDebounce;
+
+  @override
+  void dispose() {
+    _cellEditor.dispose();
+    _tableHorizontal.dispose();
+    _tableVertical.dispose();
+    _searchDebounce?.cancel();
+    super.dispose();
+  }
 
   Widget _tableAlerts() => _TableAlerts(
     api: widget.api,
@@ -58,10 +85,27 @@ class _ModuleScreenState extends State<ModuleScreen> {
   }
 
   void reload() => setState(() {
-    future = widget.api.get(dataPath);
+    future = widget.api.get(_collectionSearchPath);
+    _tableMetaFuture = null;
     groceryReportsFuture = null;
     recentBookingsFuture = null;
   });
+
+  String get _collectionSearchPath {
+    if (widget.module.columns.isEmpty || search.trim().isEmpty) {
+      return dataPath;
+    }
+    return '${widget.module.path}?search=${Uri.encodeQueryComponent(search.trim())}';
+  }
+
+  void _searchRecords(String value) {
+    setState(() => search = value);
+    _searchDebounce?.cancel();
+    if (widget.module.columns.isEmpty) return;
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) setState(() => future = widget.api.get(_collectionSearchPath));
+    });
+  }
 
   Future<void> request(
     String method,
@@ -1644,6 +1688,50 @@ class _ModuleScreenState extends State<ModuleScreen> {
     );
   }
 
+  Widget _tableLayoutMenu() {
+    _tableMetaFuture ??= _loadTableMeta();
+    return FutureBuilder<_RecordTableMeta>(
+      future: _tableMetaFuture,
+      builder:
+          (context, snapshot) => Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PopupMenuButton<String>(
+                tooltip: 'Table layout',
+                icon: const Icon(Icons.menu),
+                onSelected: (choice) {
+                  if (choice == 'rearrange') {
+                    setState(() {
+                      _rearrangingTable = !_rearrangingTable;
+                      _editingRecordId = null;
+                      _editingFieldKey = null;
+                    });
+                  } else if (choice == 'reset' && snapshot.hasData) {
+                    _resetTableLayout(snapshot.data!);
+                  }
+                },
+                itemBuilder:
+                    (_) => const [
+                      PopupMenuItem(
+                        value: 'rearrange',
+                        child: Text('Rearrange'),
+                      ),
+                      PopupMenuItem(
+                        value: 'reset',
+                        child: Text('Reset Table Layout'),
+                      ),
+                    ],
+              ),
+              if (_rearrangingTable)
+                TextButton(
+                  onPressed: () => setState(() => _rearrangingTable = false),
+                  child: const Text('Done'),
+                ),
+            ],
+          ),
+    );
+  }
+
   Widget _collection(List<Map<String, dynamic>> rows) {
     final statuses = <String>{};
     for (final row in rows) {
@@ -1691,7 +1779,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
               FilledButton.icon(
                 onPressed: create,
                 icon: const Icon(Icons.add),
-                label: Text(widget.module.createLabel ?? 'New purchase order'),
+                label: const Text('Add Record'),
               ),
           ],
         ),
@@ -1703,7 +1791,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
             SizedBox(
               width: 360,
               child: TextField(
-                onChanged: (value) => setState(() => search = value),
+                onChanged: _searchRecords,
                 decoration: const InputDecoration(
                   prefixIcon: Icon(Icons.search),
                   hintText: 'Search records',
@@ -1711,6 +1799,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
                 ),
               ),
             ),
+            _tableLayoutMenu(),
             if (statuses.isNotEmpty)
               SizedBox(
                 width: 190,
@@ -1744,13 +1833,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
             ),
           )
         else
-          LayoutBuilder(
-            builder:
-                (context, constraints) =>
-                    constraints.maxWidth < 700
-                        ? Column(children: filtered.map(_recordCard).toList())
-                        : _recordTable(filtered),
-          ),
+          _recordTable(filtered),
       ],
     );
   }
@@ -1817,7 +1900,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
                     FilledButton.icon(
                       onPressed: create,
                       icon: const Icon(Icons.add_rounded),
-                      label: Text(widget.module.createLabel ?? 'New record'),
+                      label: const Text('Add Record'),
                     ),
                 ],
               ),
@@ -1834,7 +1917,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
                 SizedBox(
                   width: 345,
                   child: TextField(
-                    onChanged: (value) => setState(() => search = value),
+                    onChanged: _searchRecords,
                     decoration: const InputDecoration(
                       prefixIcon: Icon(Icons.search_rounded, size: 20),
                       hintText: 'Search records',
@@ -1842,6 +1925,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
                     ),
                   ),
                 ),
+                _tableLayoutMenu(),
                 if (statuses.isNotEmpty)
                   SizedBox(
                     width: 195,
@@ -1902,230 +1986,546 @@ class _ModuleScreenState extends State<ModuleScreen> {
             ),
           )
         else
-          LayoutBuilder(
-            builder:
-                (context, constraints) =>
-                    constraints.maxWidth < 700
-                        ? Column(children: filtered.map(_recordCard).toList())
-                        : _recordTable(filtered),
-          ),
+          _recordTable(filtered),
       ],
     );
   }
 
-  Widget _recordCard(Map<String, dynamic> row) =>
-      widget.grocery
-          ? Card(
-            child: InkWell(
-              borderRadius: BorderRadius.circular(14),
-              onTap: () => _detail(row),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      displayValue(row[widget.module.columns.first]),
-                      style: Theme.of(context).textTheme.titleMedium,
+  String get _layoutPath {
+    final platform = widget.grocery ? 'grocery' : 'airline';
+    final collection = widget.module.path.split('/').last;
+    return '/api/table-layouts/$platform/$collection';
+  }
+
+  Future<_RecordTableMeta> _loadTableMeta() async {
+    List<FieldSpec> fields = widget.module.fields;
+    if (_hasConfigurableForm) {
+      try {
+        fields = await loadRecordFields(widget.api, _formModule!);
+      } catch (_) {
+        // The record list still works if a legacy server lacks form settings.
+      }
+    }
+    fields = fields.where((field) => field.key != 'password').toList();
+    if (fields.isEmpty) {
+      fields = [
+        for (final key in widget.module.columns) FieldSpec(key, _label(key)),
+      ];
+    }
+    try {
+      final response = asMap(await widget.api.get(_layoutPath));
+      return _RecordTableMeta(
+        fields,
+        (response['columns'] as List? ?? []).map((e) => e.toString()).toList(),
+        (response['rows'] as List? ?? []).map((e) => e.toString()).toList(),
+        (response['revision'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) {
+      return _RecordTableMeta(fields, [], [], 0);
+    }
+  }
+
+  List<FieldSpec> _orderedTableFields(_RecordTableMeta meta) {
+    final fields = [...meta.fields];
+    if (meta.columnOrder.isEmpty) return fields;
+    final positions = <String, int>{
+      for (var index = 0; index < meta.columnOrder.length; index++)
+        meta.columnOrder[index]: index,
+    };
+    fields.sort((a, b) {
+      final left =
+          positions[a.key] ?? meta.columnOrder.length + meta.fields.indexOf(a);
+      final right =
+          positions[b.key] ?? meta.columnOrder.length + meta.fields.indexOf(b);
+      return left.compareTo(right);
+    });
+    return fields;
+  }
+
+  List<Map<String, dynamic>> _orderedTableRows(
+    _RecordTableMeta meta,
+    List<Map<String, dynamic>> rows,
+  ) {
+    if (meta.rowOrder.isEmpty) return rows;
+    final positions = <String, int>{
+      for (var index = 0; index < meta.rowOrder.length; index++)
+        meta.rowOrder[index]: index,
+    };
+    final ordered = [...rows];
+    ordered.sort((a, b) {
+      final left =
+          positions[a['id']?.toString()] ??
+          meta.rowOrder.length + rows.indexOf(a);
+      final right =
+          positions[b['id']?.toString()] ??
+          meta.rowOrder.length + rows.indexOf(b);
+      return left.compareTo(right);
+    });
+    return ordered;
+  }
+
+  Future<void> _persistTableLayout(
+    _RecordTableMeta meta, {
+    List<String>? columns,
+    List<String>? rows,
+  }) async {
+    if (_savingTableLayout) return;
+    setState(() => _savingTableLayout = true);
+    try {
+      final response = asMap(
+        await widget.api.patch(_layoutPath, {
+          'revision': meta.revision,
+          if (columns != null) 'columns': columns,
+          if (rows != null) 'rows': rows,
+        }),
+      );
+      if (!mounted) return;
+      setState(() {
+        meta.revision =
+            (response['revision'] as num?)?.toInt() ?? meta.revision + 1;
+        if (columns != null) meta.columnOrder = columns;
+        if (rows != null) meta.rowOrder = rows;
+      });
+    } catch (error) {
+      if (mounted) widget.message('Could not save table layout: $error');
+    } finally {
+      if (mounted) setState(() => _savingTableLayout = false);
+    }
+  }
+
+  void _moveTableColumn(
+    _RecordTableMeta meta,
+    List<FieldSpec> fields,
+    int index,
+    int step,
+  ) {
+    if (_savingTableLayout) return;
+    final next = fields.map((field) => field.key).toList();
+    final target = index + step;
+    if (target < 0 || target >= next.length) return;
+    final moved = next.removeAt(index);
+    next.insert(target, moved);
+    _persistTableLayout(meta, columns: next);
+  }
+
+  void _moveTableRow(
+    _RecordTableMeta meta,
+    List<Map<String, dynamic>> rows,
+    int index,
+    int step,
+  ) {
+    if (_savingTableLayout ||
+        search.isNotEmpty ||
+        status.isNotEmpty ||
+        widget.user['role'] != 'Agency owner') {
+      return;
+    }
+    final next = rows.map((row) => row['id'].toString()).toList();
+    final target = index + step;
+    if (target < 0 || target >= next.length) return;
+    final moved = next.removeAt(index);
+    next.insert(target, moved);
+    _persistTableLayout(meta, rows: next);
+  }
+
+  void _resetTableLayout(_RecordTableMeta meta) {
+    setState(() => _rearrangingTable = false);
+    _persistTableLayout(
+      meta,
+      columns: [],
+      rows: widget.user['role'] == 'Agency owner' ? [] : null,
+    );
+  }
+
+  bool _canEditTableField(FieldSpec field) =>
+      widget.module.editPath != null &&
+      !{'id', 'createdAt', 'updatedAt'}.contains(field.key);
+
+  Future<void> _saveTableCell(Map<String, dynamic> row, FieldSpec field) async {
+    final raw = _cellEditor.text.trim();
+    if (field.required && raw.isEmpty) {
+      widget.message('${field.label} is required');
+      return;
+    }
+    if (field.type == FieldType.choice &&
+        raw.isNotEmpty &&
+        field.choices.isNotEmpty &&
+        !field.choices.contains(raw)) {
+      widget.message('Choose a valid ${field.label}');
+      return;
+    }
+    dynamic value = raw;
+    if (field.type == FieldType.number) {
+      value = num.tryParse(raw);
+      if (value == null) {
+        widget.message('Enter a valid number');
+        return;
+      }
+    } else if (field.type == FieldType.toggle) {
+      value = raw == 'true';
+    } else if (field.type == FieldType.date &&
+        raw.isNotEmpty &&
+        DateTime.tryParse(raw) == null) {
+      widget.message('Enter a valid date');
+      return;
+    }
+    final id = row['id']?.toString();
+    if (id == null || id.isEmpty) return;
+    final oldValue = row[field.key];
+    setState(() {
+      row[field.key] = value;
+      _editingRecordId = null;
+      _editingFieldKey = null;
+    });
+    try {
+      await widget.api.patch(
+        '${widget.module.editPath}/${Uri.encodeComponent(id)}',
+        {field.key: value},
+      );
+      if (mounted) {
+        widget.onUpdated();
+        widget.message('Cell saved');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => row[field.key] = oldValue);
+      widget.message('Could not save cell: $error');
+    }
+  }
+
+  Widget _tableCell(Map<String, dynamic> row, FieldSpec field) {
+    final value = displayValue(row[field.key]);
+    final choices =
+        field.type == FieldType.toggle
+            ? const ['true', 'false']
+            : field.choices;
+    final editing =
+        _editingRecordId == row['id']?.toString() &&
+        _editingFieldKey == field.key;
+    return SizedBox(
+      width: 210,
+      height: 48,
+      child:
+          editing
+              ? Row(
+                children: [
+                  Expanded(
+                    child: Focus(
+                      onKeyEvent: (_, event) {
+                        if (event is KeyDownEvent &&
+                            event.logicalKey == LogicalKeyboardKey.escape) {
+                          setState(() {
+                            _editingRecordId = null;
+                            _editingFieldKey = null;
+                          });
+                          return KeyEventResult.handled;
+                        }
+                        return KeyEventResult.ignored;
+                      },
+                      child:
+                          field.type == FieldType.toggle ||
+                                  (field.type == FieldType.choice &&
+                                      choices.isNotEmpty)
+                              ? DropdownButton<String>(
+                                value:
+                                    choices.contains(_cellEditor.text)
+                                        ? _cellEditor.text
+                                        : null,
+                                isExpanded: true,
+                                items: [
+                                  for (final option in choices)
+                                    DropdownMenuItem(
+                                      value: option,
+                                      child: Text(
+                                        option,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                ],
+                                onChanged: (choice) {
+                                  if (choice != null) {
+                                    setState(() => _cellEditor.text = choice);
+                                  }
+                                },
+                              )
+                              : TextField(
+                                key: const ValueKey('module-cell-editor'),
+                                controller: _cellEditor,
+                                autofocus: true,
+                                maxLines: 1,
+                                keyboardType:
+                                    field.type == FieldType.number
+                                        ? const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        )
+                                        : field.type == FieldType.date
+                                        ? TextInputType.datetime
+                                        : TextInputType.text,
+                                decoration: const InputDecoration(
+                                  isDense: true,
+                                ),
+                                onSubmitted: (_) => _saveTableCell(row, field),
+                              ),
                     ),
-                    const SizedBox(height: 8),
-                    ...widget.module.columns
-                        .skip(1)
-                        .take(5)
-                        .map(
-                          (key) => Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 2),
-                            child: Text(
-                              '${_label(key)}: ${displayValue(row[key])}',
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: () => _detail(row),
-                        child: const Text('Details & actions'),
-                      ),
+                  ),
+                  IconButton(
+                    tooltip: 'Save cell',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 28,
                     ),
-                  ],
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.check, size: 17),
+                    onPressed: () => _saveTableCell(row, field),
+                  ),
+                  IconButton(
+                    tooltip: 'Cancel edit',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 28,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.close, size: 17),
+                    onPressed:
+                        () => setState(() {
+                          _editingRecordId = null;
+                          _editingFieldKey = null;
+                        }),
+                  ),
+                ],
+              )
+              : InkWell(
+                onTap:
+                    _canEditTableField(field) && !_rearrangingTable
+                        ? () => setState(() {
+                          _editingRecordId = row['id']?.toString();
+                          _editingFieldKey = field.key;
+                          _cellEditor.text = row[field.key]?.toString() ?? '';
+                        })
+                        : null,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Tooltip(
+                    message: value,
+                    child: Text(
+                      value,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 ),
               ),
-            ),
-          )
-          : Padding(
-            padding: const EdgeInsets.only(bottom: 11),
-            child: Card(
-              child: InkWell(
-                borderRadius: BorderRadius.circular(17),
-                onTap: () => _detail(row),
-                child: Padding(
-                  padding: const EdgeInsets.all(17),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            width: 37,
-                            height: 37,
-                            decoration: BoxDecoration(
-                              color: TravelPalette.purpleSoft,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Icon(
-                              widget.module.icon,
-                              size: 18,
-                              color: TravelPalette.purple,
-                            ),
+    );
+  }
+
+  Widget _recordTable(List<Map<String, dynamic>> rows) {
+    _tableMetaFuture ??= _loadTableMeta();
+    return FutureBuilder<_RecordTableMeta>(
+      future: _tableMetaFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final meta = snapshot.data!;
+        final fields = _orderedTableFields(meta);
+        final orderedRows = _orderedTableRows(meta, rows);
+        final canMoveRows =
+            search.isEmpty &&
+            status.isEmpty &&
+            widget.user['role'] == 'Agency owner';
+        return Card(
+          child: SizedBox(
+            height: (orderedRows.length * 52.0 + 65).clamp(120.0, 560.0),
+            child: Scrollbar(
+              controller: _tableHorizontal,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _tableHorizontal,
+                scrollDirection: Axis.horizontal,
+                child: Scrollbar(
+                  controller: _tableVertical,
+                  thumbVisibility: true,
+                  child: SingleChildScrollView(
+                    controller: _tableVertical,
+                    child: DataTable(
+                      showBottomBorder: true,
+                      dataRowMinHeight: 52,
+                      dataRowMaxHeight: 52,
+                      columns: [
+                        DataColumn(
+                          label: SizedBox(
+                            width: 108,
+                            child: Text(_rearrangingTable ? 'Order' : '#'),
                           ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              displayValue(row[widget.module.columns.first]),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                          if ((row['status'] ?? '').toString().isNotEmpty)
-                            TravelStatusChip(row['status'].toString()),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      ...widget.module.columns
-                          .skip(1)
-                          .take(5)
-                          .map(
-                            (key) => Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 3),
+                        ),
+                        for (var index = 0; index < fields.length; index++)
+                          DataColumn(
+                            label: SizedBox(
+                              width: 210,
                               child: Row(
                                 children: [
-                                  SizedBox(
-                                    width: 110,
-                                    child: Text(
-                                      _label(key),
-                                      style: const TextStyle(
-                                        color: TravelPalette.muted,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ),
                                   Expanded(
                                     child: Text(
-                                      displayValue(row[key]),
+                                      fields[index].label,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
                                     ),
                                   ),
+                                  if (_rearrangingTable) ...[
+                                    IconButton(
+                                      tooltip:
+                                          'Move ${fields[index].label} left',
+                                      constraints: const BoxConstraints(
+                                        minWidth: 27,
+                                        minHeight: 28,
+                                      ),
+                                      padding: EdgeInsets.zero,
+                                      icon: const Icon(
+                                        Icons.arrow_back,
+                                        size: 16,
+                                      ),
+                                      onPressed:
+                                          index == 0 || _savingTableLayout
+                                              ? null
+                                              : () => _moveTableColumn(
+                                                meta,
+                                                fields,
+                                                index,
+                                                -1,
+                                              ),
+                                    ),
+                                    IconButton(
+                                      tooltip:
+                                          'Move ${fields[index].label} right',
+                                      constraints: const BoxConstraints(
+                                        minWidth: 27,
+                                        minHeight: 28,
+                                      ),
+                                      padding: EdgeInsets.zero,
+                                      icon: const Icon(
+                                        Icons.arrow_forward,
+                                        size: 16,
+                                      ),
+                                      onPressed:
+                                          index == fields.length - 1 ||
+                                                  _savingTableLayout
+                                              ? null
+                                              : () => _moveTableColumn(
+                                                meta,
+                                                fields,
+                                                index,
+                                                1,
+                                              ),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
                           ),
-                      const SizedBox(height: 5),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: TextButton.icon(
-                          onPressed: () => _detail(row),
-                          icon: const Icon(
-                            Icons.arrow_forward_rounded,
-                            size: 17,
+                        const DataColumn(label: Text('')),
+                      ],
+                      rows: [
+                        for (var index = 0; index < orderedRows.length; index++)
+                          DataRow(
+                            cells: [
+                              DataCell(
+                                SizedBox(
+                                  width: 108,
+                                  child:
+                                      _rearrangingTable
+                                          ? Row(
+                                            children: [
+                                              IconButton(
+                                                tooltip: 'Move row up',
+                                                constraints:
+                                                    const BoxConstraints(
+                                                      minWidth: 28,
+                                                      minHeight: 28,
+                                                    ),
+                                                padding: EdgeInsets.zero,
+                                                icon: const Icon(
+                                                  Icons.arrow_upward,
+                                                  size: 16,
+                                                ),
+                                                onPressed:
+                                                    !canMoveRows ||
+                                                            index == 0 ||
+                                                            _savingTableLayout
+                                                        ? null
+                                                        : () => _moveTableRow(
+                                                          meta,
+                                                          orderedRows,
+                                                          index,
+                                                          -1,
+                                                        ),
+                                              ),
+                                              IconButton(
+                                                tooltip: 'Move row down',
+                                                constraints:
+                                                    const BoxConstraints(
+                                                      minWidth: 28,
+                                                      minHeight: 28,
+                                                    ),
+                                                padding: EdgeInsets.zero,
+                                                icon: const Icon(
+                                                  Icons.arrow_downward,
+                                                  size: 16,
+                                                ),
+                                                onPressed:
+                                                    !canMoveRows ||
+                                                            index ==
+                                                                orderedRows
+                                                                        .length -
+                                                                    1 ||
+                                                            _savingTableLayout
+                                                        ? null
+                                                        : () => _moveTableRow(
+                                                          meta,
+                                                          orderedRows,
+                                                          index,
+                                                          1,
+                                                        ),
+                                              ),
+                                            ],
+                                          )
+                                          : Text('${index + 1}'),
+                                ),
+                              ),
+                              for (final field in fields)
+                                DataCell(_tableCell(orderedRows[index], field)),
+                              DataCell(
+                                widget.module.key == 'company_assets'
+                                    ? IconButton(
+                                      tooltip: 'Delete row',
+                                      icon: const Icon(Icons.delete_outline),
+                                      onPressed:
+                                          () => _deleteCompanyAsset(
+                                            orderedRows[index],
+                                          ),
+                                    )
+                                    : IconButton(
+                                      tooltip: 'Details',
+                                      icon: const Icon(Icons.chevron_right),
+                                      onPressed:
+                                          () => _detail(orderedRows[index]),
+                                    ),
+                              ),
+                            ],
                           ),
-                          label: const Text('Details & actions'),
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ),
-          );
-
-  Widget _recordTable(List<Map<String, dynamic>> rows) => Card(
-    child: SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: DataTable(
-        showBottomBorder: true,
-        headingRowColor:
-            widget.grocery
-                ? null
-                : const WidgetStatePropertyAll(Color(0xfff8f7fd)),
-        headingTextStyle:
-            widget.grocery
-                ? null
-                : const TextStyle(
-                  color: TravelPalette.muted,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: .6,
-                ),
-        dataRowMinHeight: widget.grocery ? null : 62,
-        dataRowMaxHeight: widget.grocery ? null : 70,
-        border: const TableBorder(
-          verticalInside: BorderSide(color: Color(0xffdce5e9)),
-          horizontalInside: BorderSide(color: Color(0xffedf1f3)),
-        ),
-        columns: [
-          ...widget.module.columns.map(
-            (key) => DataColumn(
-              label: Text(
-                widget.grocery ? _label(key) : _label(key).toUpperCase(),
               ),
             ),
           ),
-          const DataColumn(label: Text('')),
-        ],
-        rows:
-            rows
-                .map(
-                  (row) => DataRow(
-                    cells: [
-                      ...widget.module.columns.map(
-                        (key) => DataCell(
-                          SizedBox(
-                            width: 130,
-                            child:
-                                !widget.grocery &&
-                                        (key == 'status' ||
-                                            key == 'paymentStatus') &&
-                                        (row[key] ?? '').toString().isNotEmpty
-                                    ? Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: TravelStatusChip(
-                                        row[key].toString(),
-                                      ),
-                                    )
-                                    : Text(
-                                      displayValue(row[key]),
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                          ),
-                          onTap: () => _detail(row),
-                        ),
-                      ),
-                      DataCell(
-                        IconButton(
-                          tooltip: 'Details',
-                          onPressed: () => _detail(row),
-                          icon: const Icon(Icons.chevron_right),
-                        ),
-                      ),
-                    ],
-                  ),
-                )
-                .toList(),
-      ),
-    ),
-  );
+        );
+      },
+    );
+  }
 
   Widget _section(
     String title,

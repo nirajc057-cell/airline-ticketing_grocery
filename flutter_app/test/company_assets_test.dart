@@ -69,7 +69,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Assign asset'));
+    await tester.tap(find.text('Add Record'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Employee name'),
@@ -84,21 +84,18 @@ void main() {
     expect(api.rows.single['employeeName'], 'Alex');
     expect(api.rows.single['assetName'], 'Laptop');
 
-    await tester.tap(find.text('Alex').first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.text('Laptop').first);
+    await tester.pump();
     await tester.enterText(
-      find.widgetWithText(TextFormField, 'What they took'),
+      find.byKey(const ValueKey('module-cell-editor')),
       'Phone',
     );
-    await tester.tap(find.text('Save'));
+    await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
     expect(api.rows.single['assetName'], 'Phone');
 
-    await tester.tap(find.text('Alex').first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Delete record'));
+    await tester.ensureVisible(find.byTooltip('Delete row').first);
+    await tester.tap(find.byTooltip('Delete row').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete record').last);
     await tester.pumpAndSettle();

@@ -380,6 +380,7 @@ Map<String, dynamic> recordFormConfig(
         ? (value['removed'] as List).whereType<String>().toList()
         : <String>[],
     'custom': records(value['custom']),
+    'archivedCustom': records(value['archivedCustom']),
     'labels': asObject(value['labels']),
     'order': value['order'] is List
         ? (value['order'] as List).whereType<String>().toList()

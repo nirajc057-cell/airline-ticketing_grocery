@@ -70,6 +70,7 @@ Map<String, dynamic> emptyWorkspace(String email) => {
       'tableColumns': {'bookings': <Object>[], 'products': <Object>[]},
       'tableSetup': <String, Object>{},
       'tableDrafts': {'bookings': <Object>[], 'products': <Object>[]},
+      'tableLayouts': <String, Object>{},
       'customTables': <Object>[],
       'companyAssets': <Object>[],
       'wallet': {

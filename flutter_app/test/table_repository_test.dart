@@ -12,6 +12,17 @@ class _FakeTableApi extends ApiClient {
     '/api/bookings' => <Object>[],
     '/api/bookings/table-columns' => <Object>[],
     '/api/bookings/table-setup' => {'initialized': true},
+    '/api/bookings/form-fields' => {
+      'removed': <String>[],
+      'custom': <Object>[],
+      'labels': <String, String>{},
+      'order': <String>[],
+    },
+    '/api/bookings/table-layout' => {
+      'columns': <String>[],
+      'rows': <String>[],
+      'revision': 0,
+    },
     '/api/bookings/table-drafts' => [
       {
         'id': 'D-1',
@@ -46,6 +57,10 @@ void main() {
     expect(snapshot.initialized, isTrue);
     expect(snapshot.rows.single.draftId, 'D-1');
     expect(snapshot.rows.single.values['customerName'], 'Jane');
+    expect(
+      snapshot.formColumns.any((column) => column.key == 'customerName'),
+      isTrue,
+    );
   });
 
   test('incomplete draft is saved without creating a booking', () async {

@@ -6,6 +6,7 @@ import 'package:aerodesk_client/modules.dart';
 import 'package:aerodesk_client/screens.dart';
 import 'package:aerodesk_client/travel_ui.dart';
 import 'package:aerodesk_client/table_screen.dart';
+import 'package:aerodesk_client/table_model.dart';
 
 class _FakeApi extends ApiClient {
   @override
@@ -43,6 +44,9 @@ class _TableApi extends ApiClient {
   bool initialized;
   Map<String, dynamic>? lastPatch;
   Map<String, dynamic>? setupBody;
+  List<String> layoutColumns = [];
+  List<String> layoutRows = [];
+  int layoutRevision = 0;
 
   @override
   Future<dynamic> get(String path) async {
@@ -51,7 +55,22 @@ class _TableApi extends ApiClient {
       return {'initialized': initialized};
     }
     if (path == '/api/bookings/table-drafts') return <Object>[];
-    if (path == '/api/bookings') {
+    if (path == '/api/bookings/form-fields') {
+      return {
+        'removed': <String>[],
+        'custom': <Object>[],
+        'labels': <String, String>{},
+        'order': <String>[],
+      };
+    }
+    if (path == '/api/bookings/table-layout') {
+      return {
+        'columns': layoutColumns,
+        'rows': layoutRows,
+        'revision': layoutRevision,
+      };
+    }
+    if (path == '/api/bookings' || path.startsWith('/api/bookings?search=')) {
       return [
         {
           'id': 'BK-1',
@@ -81,6 +100,20 @@ class _TableApi extends ApiClient {
   @override
   Future<dynamic> patch(String path, Object body) async {
     lastPatch = Map<String, dynamic>.from(body as Map);
+    if (path == '/api/bookings/table-layout') {
+      if (lastPatch!.containsKey('columns')) {
+        layoutColumns = (lastPatch!['columns'] as List).cast<String>();
+      }
+      if (lastPatch!.containsKey('rows')) {
+        layoutRows = (lastPatch!['rows'] as List).cast<String>();
+      }
+      layoutRevision++;
+      return {
+        'columns': layoutColumns,
+        'rows': layoutRows,
+        'revision': layoutRevision,
+      };
+    }
     return {
       'id': 'BK-1',
       'reference': 'BK-1',
@@ -91,6 +124,57 @@ class _TableApi extends ApiClient {
       'status': 'On hold',
       'paymentStatus': 'Pending',
     };
+  }
+}
+
+class _ModuleTableApi extends ApiClient {
+  final rows = <Map<String, dynamic>>[
+    {
+      'id': 'A-1',
+      'assetName': 'Laptop',
+      'employeeName': 'Nischal',
+      'quantity': 1,
+    },
+    {'id': 'A-2', 'assetName': 'Phone', 'employeeName': 'Rita', 'quantity': 1},
+  ];
+  List<String> columns = [];
+  List<String> order = [];
+  int revision = 0;
+  String? editedPath;
+  Map<String, dynamic>? editedBody;
+
+  @override
+  Future<dynamic> get(String path) async {
+    if (path == '/api/company-assets') return rows;
+    if (path == '/api/form-fields/company_assets') {
+      return {
+        'removed': <String>[],
+        'custom': <Object>[],
+        'labels': {'assetName': 'Assigned equipment'},
+        'order': ['assetName', 'employeeName'],
+      };
+    }
+    if (path == '/api/table-layouts/airline/company-assets') {
+      return {'columns': columns, 'rows': order, 'revision': revision};
+    }
+    throw StateError('Unexpected GET $path');
+  }
+
+  @override
+  Future<dynamic> patch(String path, Object body) async {
+    final data = Map<String, dynamic>.from(body as Map);
+    if (path == '/api/table-layouts/airline/company-assets') {
+      if (data['columns'] is List) {
+        columns = (data['columns'] as List).cast<String>();
+      }
+      if (data['rows'] is List) order = (data['rows'] as List).cast<String>();
+      revision++;
+      return {'columns': columns, 'rows': order, 'revision': revision};
+    }
+    editedPath = path;
+    editedBody = data;
+    rows.firstWhere((row) => row['id'] == 'A-1').addAll(data);
+    return rows.first;
   }
 }
 
@@ -131,11 +215,11 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.textContaining('Test Passenger'), findsWidgets);
-    await tester.tap(find.text('New booking'));
+    await tester.tap(find.text('Add Record'));
     await tester.pumpAndSettle();
-    expect(find.text('Passenger full name'), findsOneWidget);
-    expect(find.text('From airport'), findsOneWidget);
-    expect(find.text('To airport'), findsOneWidget);
+    expect(find.text('Passenger full name'), findsWidgets);
+    expect(find.text('From airport'), findsWidgets);
+    expect(find.text('To airport'), findsWidgets);
   });
 
   testWidgets('booking records use a scrollable table on desktop', (
@@ -167,6 +251,61 @@ void main() {
     expect(find.text('Test Passenger'), findsOneWidget);
   });
 
+  testWidgets('module table follows form labels, edits and saves its layout', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _ModuleTableApi();
+    final module = airlineModules.firstWhere(
+      (item) => item.key == 'company_assets',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: api,
+            module: module,
+            grocery: false,
+            user: const {'name': 'Owner', 'role': 'Agency owner'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Assigned equipment'), findsOneWidget);
+    await tester.tap(find.text('Laptop'));
+    await tester.pump();
+    await tester.enterText(
+      find.byKey(const ValueKey('module-cell-editor')),
+      'Tablet',
+    );
+    await tester.tap(find.byTooltip('Save cell'));
+    await tester.pumpAndSettle();
+    expect(api.editedPath, '/api/company-assets/A-1');
+    expect(api.editedBody!['assetName'], 'Tablet');
+    await tester.tap(find.byTooltip('Table layout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rearrange'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Move Employee name left'));
+    await tester.pumpAndSettle();
+    expect(api.columns.first, 'employeeName');
+    await tester.tap(find.byTooltip('Move row down').first);
+    await tester.pumpAndSettle();
+    expect(api.order.first, 'A-2');
+    await tester.tap(find.byTooltip('Table layout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reset Table Layout'));
+    await tester.pumpAndSettle();
+    expect(api.columns, isEmpty);
+    expect(api.order, isEmpty);
+  });
+
   testWidgets('passport service and refund have new-record forms', (
     tester,
   ) async {
@@ -188,12 +327,12 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Manage form fields'), findsOneWidget);
-      await tester.tap(find.text(module.createLabel!));
+      await tester.tap(find.text('Add Record'));
       await tester.pumpAndSettle();
       expect(find.byTooltip('Manage form fields'), findsOneWidget);
       expect(
         find.text(key == 'passports' ? 'Service type' : 'Refund amount'),
-        findsOneWidget,
+        findsWidgets,
       );
       await tester.tap(find.byIcon(Icons.close).last);
       await tester.pumpAndSettle();
@@ -255,18 +394,42 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Test Passenger'), findsOneWidget);
-    expect(find.text('Add Row'), findsOneWidget);
-    await tester.longPress(find.text('Test Passenger'));
-    await tester.pumpAndSettle();
+    expect(find.text('Add Record'), findsOneWidget);
+    await tester.tap(find.text('Test Passenger'));
+    await tester.pump();
     await tester.enterText(find.byType(TextField).last, 'Updated Passenger');
-    await tester.tap(find.text('Apply'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Save'));
+    await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
     expect(api.lastPatch, {
       'customerName': 'Updated Passenger',
       'tableEdit': true,
     });
+  });
+
+  testWidgets('search refresh keeps an unsaved draft row', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TableScreen(
+            api: _TableApi(),
+            grocery: false,
+            message: (_) {},
+            onUpdated: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final state = tester.state<TableScreenState>(find.byType(TableScreen));
+    state.rows.insert(
+      0,
+      SpreadsheetRow({'customerName': 'Unsaved Draft'}, isNew: true),
+    );
+    state.searchController.text = 'Unsaved';
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+    expect(state.hasPendingChanges, true);
+    expect(find.text('Unsaved Draft'), findsOneWidget);
   });
 
   testWidgets('table toolbar remains usable on a phone', (tester) async {
@@ -287,9 +450,48 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Add Row'), findsOneWidget);
+    expect(find.text('Add Record'), findsOneWidget);
     expect(find.text('Search table data'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('linked table column order saves and reset keeps records', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1500, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _TableApi();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TableScreen(
+            api: api,
+            grocery: false,
+            message: (_) {},
+            onUpdated: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Table layout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rearrange'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Move Reference right'));
+    await tester.pumpAndSettle();
+    expect(
+      api.layoutColumns.indexOf('pnr'),
+      lessThan(api.layoutColumns.indexOf('reference')),
+    );
+    await tester.tap(find.byTooltip('Table layout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reset Table Layout'));
+    await tester.pumpAndSettle();
+    expect(api.layoutColumns, isEmpty);
+    expect(find.text('Test Passenger'), findsOneWidget);
   });
 
   testWidgets('table asks for rows and columns before editing', (tester) async {
@@ -313,10 +515,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Number of blank rows'), findsOneWidget);
     expect(find.text('Number of extra columns'), findsOneWidget);
-    expect(find.text('Add Row'), findsNothing);
+    expect(find.text('Add Record'), findsNothing);
     await tester.tap(find.text('Create table'));
     await tester.pumpAndSettle();
     expect(api.setupBody, {'rows': 5, 'extraColumns': 0});
-    expect(find.text('Add Row'), findsOneWidget);
+    expect(find.text('Add Record'), findsOneWidget);
   });
 }

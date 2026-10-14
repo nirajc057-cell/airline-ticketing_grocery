@@ -87,7 +87,10 @@ class NamedTable {
     required this.platform,
     required this.revision,
     required this.columns,
+    required this.archivedColumns,
     required this.rows,
+    required this.defaultColumnIds,
+    required this.defaultRowIds,
   });
 
   final String id;
@@ -95,7 +98,36 @@ class NamedTable {
   final String platform;
   int revision;
   final List<NamedTableColumn> columns;
+  final List<NamedTableColumn> archivedColumns;
   final List<NamedTableRow> rows;
+  final List<String> defaultColumnIds;
+  final List<String> defaultRowIds;
+
+  NamedTable copy() => NamedTable(
+    id: id,
+    name: name,
+    platform: platform,
+    revision: revision,
+    columns: [
+      for (final column in columns)
+        NamedTableColumn(column.id, column.label, color: column.color),
+    ],
+    archivedColumns: [
+      for (final column in archivedColumns)
+        NamedTableColumn(column.id, column.label, color: column.color),
+    ],
+    rows: [
+      for (final row in rows)
+        NamedTableRow(
+          row.id,
+          Map.of(row.cells),
+          color: row.color,
+          notifyAt: row.notifyAt,
+        ),
+    ],
+    defaultColumnIds: [...defaultColumnIds],
+    defaultRowIds: [...defaultRowIds],
+  );
 
   factory NamedTable.fromJson(Map<String, dynamic> data) => NamedTable(
     id: data['id']?.toString() ?? '',
@@ -104,6 +136,14 @@ class NamedTable {
     revision: (data['revision'] as num?)?.toInt() ?? 1,
     columns: [
       for (final column in asRows(data['columns']))
+        NamedTableColumn(
+          column['id']?.toString() ?? '',
+          column['label']?.toString() ?? '',
+          color: column['color']?.toString(),
+        ),
+    ],
+    archivedColumns: [
+      for (final column in asRows(data['archivedColumns']))
         NamedTableColumn(
           column['id']?.toString() ?? '',
           column['label']?.toString() ?? '',
@@ -122,6 +162,16 @@ class NamedTable {
           notifyAt: row['notifyAt']?.toString(),
         ),
     ],
+    defaultColumnIds:
+        data['defaultColumnIds'] is List
+            ? (data['defaultColumnIds'] as List)
+                .map((e) => e.toString())
+                .toList()
+            : asRows(data['columns']).map((e) => e['id'].toString()).toList(),
+    defaultRowIds:
+        data['defaultRowIds'] is List
+            ? (data['defaultRowIds'] as List).map((e) => e.toString()).toList()
+            : asRows(data['rows']).map((e) => e['id'].toString()).toList(),
   );
 
   Map<String, dynamic> toUpdateJson() => {
@@ -167,6 +217,15 @@ class NamedTableRepository {
     asMap(await api.get('/api/custom-tables/${Uri.encodeComponent(id)}')),
   );
 
+  Future<Set<String>> search(String id, String query) async => {
+    for (final value
+        in (await api.get(
+              '/api/custom-tables/${Uri.encodeComponent(id)}/search?query=${Uri.encodeQueryComponent(query)}',
+            )
+            as List))
+      value.toString(),
+  };
+
   Future<NamedTable> create({
     required String name,
     required bool grocery,
@@ -185,12 +244,15 @@ class NamedTableRepository {
     ),
   );
 
-  Future<NamedTable> save(NamedTable table) async => NamedTable.fromJson(
+  Future<NamedTable> save(
+    NamedTable table, {
+    bool resetColumnOrder = false,
+  }) async => NamedTable.fromJson(
     asMap(
-      await api.patch(
-        '/api/custom-tables/${Uri.encodeComponent(table.id)}',
-        table.toUpdateJson(),
-      ),
+      await api.patch('/api/custom-tables/${Uri.encodeComponent(table.id)}', {
+        ...table.toUpdateJson(),
+        if (resetColumnOrder) 'resetColumnOrder': true,
+      }),
     ),
   );
 

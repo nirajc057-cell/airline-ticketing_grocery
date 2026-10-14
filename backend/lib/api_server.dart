@@ -341,15 +341,24 @@ class AeroDeskServer {
       final body = await _body(request);
       final key = (body['key'] ?? '').toString();
       final custom = records(config['custom']);
+      final archived = records(config['archivedCustom']);
       final removed = List<String>.from(config['removed'] as List);
       final labels = asObject(config['labels']);
       final order = List<String>.from(config['order'] as List);
       if (method == 'POST' && body['restoreKey'] is String) {
         final restoreKey = body['restoreKey'] as String;
-        if (!baseKeys.contains(restoreKey) || !removed.remove(restoreKey)) {
-          throw const ApiFailure(400, 'Built-in field is not removed');
+        if (baseKeys.contains(restoreKey) && removed.remove(restoreKey)) {
+          config['removed'] = removed;
+        } else {
+          final index =
+              archived.indexWhere((field) => field['key'] == restoreKey);
+          if (index < 0 || custom.length >= 50) {
+            throw const ApiFailure(400, 'Field is not available to restore');
+          }
+          custom.add(archived.removeAt(index));
+          config['custom'] = custom;
+          config['archivedCustom'] = archived;
         }
-        config['removed'] = removed;
         if (order.isNotEmpty) {
           order.add(restoreKey);
           config['order'] = order;
@@ -430,15 +439,16 @@ class AeroDeskServer {
           throw const ApiFailure(409,
               'This field is required for this workflow and cannot be deleted');
         }
-        custom.removeWhere((field) => field['key'] == key);
+        final customIndex = custom.indexWhere((field) => field['key'] == key);
+        if (customIndex >= 0) archived.add(custom.removeAt(customIndex));
         if (baseKeys.contains(key)) removed.add(key);
         labels.remove(key);
         config['custom'] = custom;
+        config['archivedCustom'] = archived;
         config['removed'] = removed;
         config['labels'] = labels;
         order.remove(key);
         config['order'] = order;
-        eraseRecordField(state, module, key);
       } else {
         throw const ApiFailure(405, 'Method not allowed');
       }
@@ -448,7 +458,7 @@ class AeroDeskServer {
           account,
           'Changed $module form',
           method == 'DELETE'
-              ? 'Deleted $key and saved values'
+              ? 'Removed $key from active form; saved values retained'
               : method == 'PATCH'
                   ? 'Renamed $key'
                   : 'Added or restored field');
@@ -614,6 +624,142 @@ class AeroDeskServer {
       await _save(space, state);
       return {'initialized': true};
     }
+    if (path == '/api/bookings/table-layout' ||
+        path == '/api/grocery/products/table-layout') {
+      final grocery = path.startsWith('/api/grocery/');
+      final key = grocery ? 'products' : 'bookings';
+      _requireTableAccess(state, account, grocery ? 'grocery' : 'airline');
+      final layouts = asObject(state['tableLayouts']);
+      final layout = asObject(layouts[key]);
+      final users = asObject(layout['columnsByUser']);
+      final userId = account['id'].toString();
+      Object result() => {
+            'columns': users[userId] ?? <String>[],
+            'rows': layout['rows'] ?? <String>[],
+            'revision': layout['revision'] ?? 0,
+          };
+      if (method == 'GET') return result();
+      if (method != 'PATCH') throw const ApiFailure(405, 'Method not allowed');
+      final body = await _body(request);
+      if (body['revision'] != (layout['revision'] ?? 0)) {
+        throw const ApiFailure(
+            409, 'Table order changed elsewhere. Reload before saving.');
+      }
+      if (body['columns'] is List) {
+        final requested =
+            (body['columns'] as List).map((e) => e.toString()).toList();
+        final form =
+            recordFormConfig(state, grocery ? 'grocery_products' : 'bookings');
+        final removed =
+            (form['removed'] as List).map((e) => e.toString()).toSet();
+        final valid = <String>{
+          ...formFieldKeys(grocery ? 'grocery_products' : 'bookings')
+              .where((field) => !removed.contains(field)),
+          ...records(form['custom']).map((field) => field['key'].toString()),
+          ...records(asObject(state['tableColumns'])[key])
+              .map((field) => field['key'].toString()),
+          'id',
+        };
+        if (requested.length > 100 ||
+            requested.toSet().length != requested.length ||
+            requested.any((field) => !valid.contains(field))) {
+          throw const ApiFailure(400, 'Invalid column order');
+        }
+        users[userId] = requested;
+        layout['columnsByUser'] = users;
+      }
+      if (body['rows'] is List) {
+        final requested =
+            (body['rows'] as List).map((e) => e.toString()).toList();
+        final valid = <String>{
+          ...collection(
+                  state, grocery ? '/api/grocery/products' : '/api/bookings')
+              .map((row) => row['id'].toString()),
+          ...records(asObject(state['tableDrafts'])[key])
+              .map((row) => row['id'].toString()),
+        };
+        if (requested.length > 50000 ||
+            requested.toSet().length != requested.length ||
+            requested.any((id) => !valid.contains(id))) {
+          throw const ApiFailure(400, 'Invalid row order');
+        }
+        layout['rows'] = requested;
+      }
+      layout['revision'] = (layout['revision'] as int? ?? 0) + 1;
+      layouts[key] = layout;
+      state['tableLayouts'] = layouts;
+      _audit(state, account, 'Updated table layout', key, grocery: grocery);
+      await _save(space, state);
+      return result();
+    }
+    if (path.startsWith('/api/table-layouts/')) {
+      final parts = path.split('/');
+      if (parts.length != 5 ||
+          (parts[3] != 'airline' && parts[3] != 'grocery')) {
+        throw const ApiFailure(404, 'Table not found');
+      }
+      final grocery = parts[3] == 'grocery';
+      final module = parts[4];
+      final root = grocery ? '/api/grocery/$module' : '/api/$module';
+      if (collectionKey(root).isEmpty) {
+        throw const ApiFailure(404, 'Table not found');
+      }
+      final layoutKey = '${parts[3]}:$module';
+      final layouts = asObject(state['tableLayouts']);
+      final layout = asObject(layouts[layoutKey]);
+      final users = asObject(layout['columnsByUser']);
+      final userId = account['id'].toString();
+      Object result() => {
+            'columns': users[userId] ?? <String>[],
+            'rows': layout['rows'] ?? <String>[],
+            'revision': layout['revision'] ?? 0,
+          };
+      if (method == 'GET') return result();
+      if (method != 'PATCH') throw const ApiFailure(405, 'Method not allowed');
+      final body = await _body(request);
+      if (body['revision'] != (layout['revision'] ?? 0)) {
+        throw const ApiFailure(
+            409, 'Table order changed elsewhere. Reload before saving.');
+      }
+      if (body['columns'] is List) {
+        final requested =
+            (body['columns'] as List).map((item) => item.toString()).toList();
+        if (requested.length > 100 ||
+            requested.toSet().length != requested.length ||
+            requested.any((key) =>
+                key.isEmpty ||
+                key.length > 100 ||
+                !RegExp(r'^[A-Za-z][A-Za-z0-9_]*$').hasMatch(key) ||
+                {'password', 'passwordHash', 'twoFactorSecret'}
+                    .contains(key))) {
+          throw const ApiFailure(400, 'Invalid column order');
+        }
+        users[userId] = requested;
+        layout['columnsByUser'] = users;
+      }
+      if (body['rows'] is List) {
+        _requireOwner(account);
+        final requested =
+            (body['rows'] as List).map((item) => item.toString()).toList();
+        final valid = collection(state, root)
+            .map((row) => row['id']?.toString())
+            .whereType<String>()
+            .toSet();
+        if (requested.length > 50000 ||
+            requested.toSet().length != requested.length ||
+            requested.any((id) => !valid.contains(id))) {
+          throw const ApiFailure(400, 'Invalid row order');
+        }
+        layout['rows'] = requested;
+      }
+      layout['revision'] = (layout['revision'] as int? ?? 0) + 1;
+      layouts[layoutKey] = layout;
+      state['tableLayouts'] = layouts;
+      _audit(state, account, 'Updated table layout', layoutKey,
+          grocery: grocery);
+      await _save(space, state);
+      return result();
+    }
     if (path == '/api/bookings/table-drafts' ||
         path == '/api/grocery/products/table-drafts' ||
         path.startsWith('/api/bookings/table-drafts/') ||
@@ -714,7 +860,26 @@ class AeroDeskServer {
       final detailIndex = root.startsWith('/api/grocery/') ? 3 : 2;
       if (parts.length == detailIndex && method == 'GET') {
         final rows = collection(state, root);
-        return root == '/api/users' ? rows.map(_safeUser).toList() : rows;
+        final visible =
+            root == '/api/users' ? rows.map(_safeUser).toList() : rows;
+        final search =
+            request.url.queryParameters['search']?.trim().toLowerCase() ?? '';
+        if (search.length > 200) {
+          throw const ApiFailure(400, 'Search is too long');
+        }
+        if (search.isEmpty) return visible;
+        return visible.where((row) {
+          final text = row.entries
+              .where((entry) => !{
+                    'password',
+                    'passwordHash',
+                    'twoFactorSecret',
+                  }.contains(entry.key))
+              .map((entry) => jsonEncode(entry.value))
+              .join(' ')
+              .toLowerCase();
+          return text.contains(search);
+        }).toList();
       }
       if (parts.length == detailIndex && method == 'POST') {
         if (root == '/api/audit' || root == '/api/grocery/audit') {
@@ -876,6 +1041,24 @@ class AeroDeskServer {
 
   void _authorize(
       Map<String, dynamic> state, Map<String, dynamic> account, String path) {
+    if (path.startsWith('/api/table-layouts/')) {
+      final parts = path.split('/');
+      if (parts.length != 5 ||
+          (parts[3] != 'airline' && parts[3] != 'grocery') ||
+          collectionKey(parts[3] == 'grocery'
+                  ? '/api/grocery/${parts[4]}'
+                  : '/api/${parts[4]}')
+              .isEmpty) {
+        throw const ApiFailure(404, 'Table not found');
+      }
+      _authorize(
+          state,
+          account,
+          parts[3] == 'grocery'
+              ? '/api/grocery/${parts[4]}'
+              : '/api/${parts[4]}');
+      return;
+    }
     if (path == '/api/payment-method-types' ||
         path.startsWith('/api/payment-method-types/') ||
         path == '/api/payment-methods' ||
@@ -1055,12 +1238,44 @@ class AeroDeskServer {
         'rows': List.generate(
             rowCount, (_) => {'id': _id('ROW'), 'cells': <String, String>{}})
       };
+      table['defaultColumnIds'] = records(table['columns'])
+          .map((column) => column['id'].toString())
+          .toList();
+      table['defaultRowIds'] =
+          records(table['rows']).map((row) => row['id'].toString()).toList();
+      table['archivedColumns'] = <Object>[];
       tables.add(table);
       state['customTables'] = tables;
       _audit(state, account, 'Created custom table', name,
           grocery: platform == 'grocery');
       await _save(space, state);
       return table;
+    }
+    if (path.startsWith('$root/') && path.endsWith('/search')) {
+      if (method != 'GET') throw const ApiFailure(405, 'Method not allowed');
+      final rawId =
+          path.substring(root.length + 1, path.length - '/search'.length);
+      final searchId = Uri.decodeComponent(rawId);
+      if (searchId.isEmpty || searchId.contains('/')) {
+        throw const ApiFailure(404, 'Table not found');
+      }
+      final match = tables.where((item) => item['id'] == searchId).firstOrNull;
+      if (match == null) throw const ApiFailure(404, 'Table not found');
+      _requireTableAccess(state, account, match['platform'].toString());
+      final query =
+          request.url.queryParameters['query']?.trim().toLowerCase() ?? '';
+      if (query.length > 200) throw const ApiFailure(400, 'Search is too long');
+      final activeIds = records(match['columns'])
+          .map((column) => column['id'].toString())
+          .toSet();
+      return [
+        for (final row in records(match['rows']))
+          if (query.isEmpty ||
+              asObject(row['cells']).entries.any((cell) =>
+                  activeIds.contains(cell.key) &&
+                  cell.value.toString().toLowerCase().contains(query)))
+            row['id'].toString(),
+      ];
     }
     final id = Uri.decodeComponent(path.substring(root.length + 1));
     if (id.isEmpty || id.contains('/'))
@@ -1069,7 +1284,33 @@ class AeroDeskServer {
     if (index < 0) throw const ApiFailure(404, 'Table not found');
     final table = tables[index];
     _requireTableAccess(state, account, table['platform'].toString());
-    if (method == 'GET') return table;
+    Map<String, dynamic> personalizedTable() {
+      final order =
+          (asObject(table['columnOrderByUser'])[account['id'].toString()]
+                      as List?)
+                  ?.map((value) => value.toString())
+                  .toList() ??
+              (table['defaultColumnIds'] as List?)
+                  ?.map((value) => value.toString())
+                  .toList() ??
+              <String>[];
+      final positions = {
+        for (var position = 0; position < order.length; position++)
+          order[position]: position,
+      };
+      final columns = records(table['columns']);
+      final original = [for (final column in columns) column['id'].toString()];
+      columns.sort((left, right) {
+        final leftId = left['id'].toString();
+        final rightId = right['id'].toString();
+        return (positions[leftId] ?? order.length + original.indexOf(leftId))
+            .compareTo(
+                positions[rightId] ?? order.length + original.indexOf(rightId));
+      });
+      return {...table, 'columns': columns};
+    }
+
+    if (method == 'GET') return personalizedTable();
     if (method == 'DELETE') {
       tables.removeAt(index);
       state['customTables'] = tables;
@@ -1084,6 +1325,11 @@ class AeroDeskServer {
       throw const ApiFailure(
           409, 'This table changed elsewhere. Reload before saving.');
     }
+    table['defaultColumnIds'] ??= records(table['columns'])
+        .map((column) => column['id'].toString())
+        .toList();
+    table['defaultRowIds'] ??=
+        records(table['rows']).map((row) => row['id'].toString()).toList();
     final name = body['name']?.toString().trim() ?? table['name'].toString();
     if (name.isEmpty ||
         name.length > 80 ||
@@ -1120,6 +1366,19 @@ class AeroDeskServer {
           if (color != null) 'color': color
         });
     }
+    final archivedColumns = records(table['archivedColumns']);
+    for (final previous in records(table['columns'])) {
+      final previousId = previous['id']?.toString() ?? '';
+      if (!columnIds.contains(previousId) &&
+          !archivedColumns.any((item) => item['id'] == previousId)) {
+        archivedColumns.add(previous);
+      }
+    }
+    archivedColumns.removeWhere((item) => columnIds.contains(item['id']));
+    final validCellIds = {
+      ...columnIds,
+      ...archivedColumns.map((item) => item['id'].toString()),
+    };
     final rows = body.containsKey('rows')
         ? records(body['rows'])
         : records(table['rows']);
@@ -1136,7 +1395,7 @@ class AeroDeskServer {
       final cells = asObject(row['cells']);
       final color = row['color']?.toString();
       final notifyAt = row['notifyAt']?.toString();
-      if (cells.keys.any((key) => !columnIds.contains(key)) ||
+      if (cells.keys.any((key) => !validCellIds.contains(key)) ||
           cells.values
               .any((value) => value is! String || value.length > 10000) ||
           (color != null && !RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(color)) ||
@@ -1159,8 +1418,34 @@ class AeroDeskServer {
             'reminderDismissedAt': previousRows[rowId]!['reminderDismissedAt']
         });
     }
+    final userOrders = asObject(table['columnOrderByUser']);
+    if (body['resetColumnOrder'] == true) {
+      userOrders.remove(account['id'].toString());
+    } else {
+      userOrders[account['id'].toString()] = columnIds.toList();
+    }
+    table['columnOrderByUser'] = userOrders;
+    final defaultIds = (table['defaultColumnIds'] as List)
+        .map((value) => value.toString())
+        .toList();
+    final defaultPositions = {
+      for (var position = 0; position < defaultIds.length; position++)
+        defaultIds[position]: position,
+    };
+    final requestedOrder = [
+      for (final column in columns) column['id'].toString()
+    ];
+    columns.sort((left, right) {
+      final leftId = left['id'].toString();
+      final rightId = right['id'].toString();
+      return (defaultPositions[leftId] ??
+              defaultIds.length + requestedOrder.indexOf(leftId))
+          .compareTo(defaultPositions[rightId] ??
+              defaultIds.length + requestedOrder.indexOf(rightId));
+    });
     table['name'] = name;
     table['columns'] = columns;
+    table['archivedColumns'] = archivedColumns;
     table['rows'] = rows;
     table['revision'] = (table['revision'] as int) + 1;
     table['updatedAt'] = _now();
@@ -1169,7 +1454,7 @@ class AeroDeskServer {
     _audit(state, account, 'Updated custom table', name,
         grocery: table['platform'] == 'grocery');
     await _save(space, state);
-    return table;
+    return personalizedTable();
   }
 
   void _requireTableAccess(Map<String, dynamic> state,

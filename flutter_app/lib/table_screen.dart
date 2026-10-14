@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -9,6 +10,8 @@ import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'api.dart';
+import 'booking_form_fields.dart';
+import 'form_sheet.dart';
 import 'table_model.dart';
 import 'table_repository.dart';
 
@@ -34,12 +37,23 @@ class TableScreenState extends State<TableScreen> {
   late TableKind kind;
   late TableRepository repository;
   final searchController = TextEditingController();
+  Timer? _searchDebounce;
   final filterController = TextEditingController();
   final horizontalController = ScrollController();
   final verticalController = ScrollController();
   List<SpreadsheetRow> rows = [];
   List<SpreadsheetRow> visibleRows = [];
   List<TableColumnDef> customColumns = [];
+  List<TableColumnDef> formColumns = [];
+  List<String> columnOrder = [];
+  int layoutRevision = 0;
+  bool rearranging = false;
+  bool layoutSaving = false;
+  bool adding = false;
+  SpreadsheetRow? editingRow;
+  String? editingKey;
+  final cellEditor = TextEditingController();
+  final cellFocus = FocusNode();
   SpreadsheetRow? selectedRow;
   String? selectedKey;
   String? sortKey;
@@ -49,9 +63,26 @@ class TableScreenState extends State<TableScreen> {
   bool saving = false;
   bool showFilter = false;
   bool initialized = false;
+  int _loadVersion = 0;
   String? error;
 
-  List<TableColumnDef> get columns => [...kind.baseColumns, ...customColumns];
+  List<TableColumnDef> get columns {
+    final defaults = [
+      ...(formColumns.isEmpty ? kind.baseColumns : formColumns),
+      ...customColumns,
+    ];
+    final positions = {
+      for (var index = 0; index < columnOrder.length; index++)
+        columnOrder[index]: index,
+    };
+    return [...defaults]..sort((a, b) {
+      final left = positions[a.key] ?? columnOrder.length + defaults.indexOf(a);
+      final right =
+          positions[b.key] ?? columnOrder.length + defaults.indexOf(b);
+      return left.compareTo(right);
+    });
+  }
+
   bool get hasPendingChanges =>
       rows.any((row) => row.dirty || (row.isNew && row.draftId == null));
 
@@ -60,7 +91,7 @@ class TableScreenState extends State<TableScreen> {
     super.initState();
     kind = widget.grocery ? TableKind.products : TableKind.bookings;
     repository = TableRepository(widget.api, kind);
-    searchController.addListener(_rebuildVisible);
+    searchController.addListener(_onSearchChanged);
     filterController.addListener(_rebuildVisible);
     _load();
   }
@@ -76,32 +107,81 @@ class TableScreenState extends State<TableScreen> {
       filterKey = null;
       searchController.clear();
       filterController.clear();
+      _searchDebounce?.cancel();
       _load();
     }
   }
 
   @override
   void dispose() {
-    searchController.removeListener(_rebuildVisible);
+    searchController.removeListener(_onSearchChanged);
+    _searchDebounce?.cancel();
     filterController.removeListener(_rebuildVisible);
     searchController.dispose();
     filterController.dispose();
+    cellEditor.dispose();
+    cellFocus.dispose();
     horizontalController.dispose();
     verticalController.dispose();
     super.dispose();
   }
 
+  void _onSearchChanged() {
+    _rebuildVisible();
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _load();
+    });
+  }
+
   Future<void> _load() async {
+    final version = ++_loadVersion;
     setState(() {
       loading = true;
       error = null;
     });
     try {
-      final snapshot = await repository.load();
-      if (!mounted) return;
+      final snapshot = await repository.load(
+        search: searchController.text.trim(),
+      );
+      if (!mounted || version != _loadVersion) return;
+      final pending =
+          rows
+              .where((row) => row.dirty || (row.isNew && row.draftId == null))
+              .toList();
+      final mergedRows = [...snapshot.rows];
+      for (final unsaved in pending) {
+        final match = mergedRows.indexWhere(
+          (loaded) =>
+              unsaved.id.isNotEmpty && loaded.id == unsaved.id ||
+              unsaved.draftId != null && loaded.draftId == unsaved.draftId,
+        );
+        if (match >= 0) {
+          mergedRows[match] = unsaved;
+        } else {
+          mergedRows.insert(0, unsaved);
+        }
+      }
       setState(() {
-        rows = snapshot.rows;
+        rows = mergedRows;
         customColumns = snapshot.customColumns;
+        formColumns = snapshot.formColumns;
+        columnOrder = snapshot.columnOrder;
+        layoutRevision = snapshot.layoutRevision;
+        final positions = {
+          for (var index = 0; index < snapshot.rowOrder.length; index++)
+            snapshot.rowOrder[index]: index,
+        };
+        final defaults = [...rows];
+        rows.sort((a, b) {
+          final left =
+              positions[a.draftId ?? a.id] ??
+              snapshot.rowOrder.length + defaults.indexOf(a);
+          final right =
+              positions[b.draftId ?? b.id] ??
+              snapshot.rowOrder.length + defaults.indexOf(b);
+          return left.compareTo(right);
+        });
         initialized = snapshot.initialized;
         selectedRow = null;
         selectedKey = null;
@@ -109,7 +189,7 @@ class TableScreenState extends State<TableScreen> {
       });
       _rebuildVisible();
     } catch (exception) {
-      if (!mounted) return;
+      if (!mounted || version != _loadVersion) return;
       setState(() {
         error = exception.toString();
         loading = false;
@@ -169,14 +249,16 @@ class TableScreenState extends State<TableScreen> {
   }
 
   void _sort(TableColumnDef column) {
+    if (rearranging) return;
     ascending = sortKey == column.key ? !ascending : true;
     sortKey = column.key;
     _rebuildVisible();
   }
 
   void _select(SpreadsheetRow row, TableColumnDef column) {
-    if (selectedRow == row && selectedKey == column.key) {
-      _editCell(row, column);
+    if (editingRow == row && editingKey == column.key) return;
+    if (column.editable && !rearranging) {
+      _startInlineEdit(row, column);
       return;
     }
     setState(() {
@@ -185,59 +267,123 @@ class TableScreenState extends State<TableScreen> {
     });
   }
 
-  Future<void> _editCell(SpreadsheetRow row, TableColumnDef column) async {
-    if (!column.editable) return;
-    final original = row.values[column.key]?.toString() ?? '';
-    final result = await showDialog<String>(
-      context: context,
-      builder:
-          (context) => _CellEditorDialog(column: column, initial: original),
+  void _startInlineEdit(SpreadsheetRow row, TableColumnDef column) {
+    cellEditor.text = row.values[column.key]?.toString() ?? '';
+    cellEditor.selection = TextSelection.collapsed(
+      offset: cellEditor.text.length,
     );
-    if (!mounted || result == null) return;
-    if (column.required && result.isEmpty) {
+    setState(() {
+      selectedRow = row;
+      selectedKey = column.key;
+      editingRow = row;
+      editingKey = column.key;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && editingRow == row) cellFocus.requestFocus();
+    });
+  }
+
+  void _cancelInlineEdit() => setState(() {
+    editingRow = null;
+    editingKey = null;
+  });
+
+  Future<void> _saveInlineEdit(
+    SpreadsheetRow row,
+    TableColumnDef column,
+  ) async {
+    if (saving) return;
+    final value = cellEditor.text.trim();
+    if (column.required && value.isEmpty) {
       widget.message('${column.label} is required');
       return;
     }
     if (column.type == TableValueType.number &&
-        result.isNotEmpty &&
-        !isNonNegativeNumber(result)) {
+        value.isNotEmpty &&
+        !isNonNegativeNumber(value)) {
       widget.message('${column.label} must be a non-negative number');
       return;
     }
     if (column.type == TableValueType.date &&
-        result.isNotEmpty &&
-        DateTime.tryParse(result) == null) {
-      widget.message('Use a valid date, for example 2026-10-03');
+        value.isNotEmpty &&
+        DateTime.tryParse(value) == null) {
+      widget.message('Enter a valid date');
       return;
     }
-    setState(() => row.setValue(column.key, result));
-    _rebuildVisible();
+    if (column.type == TableValueType.choice &&
+        value.isNotEmpty &&
+        !column.choices.contains(value)) {
+      widget.message('Choose a valid ${column.label}');
+      return;
+    }
+    final before = Map<String, dynamic>.of(row.values);
+    final beforeDirty = row.dirty;
+    final beforeKeys = Set<String>.of(row.changedKeys);
+    final parsed =
+        column.type == TableValueType.toggle ? value == 'true' : value;
+    setState(() {
+      row.setValue(column.key, parsed);
+      editingRow = null;
+      editingKey = null;
+      saving = true;
+    });
+    try {
+      final updated = await repository.saveRow(row, columns);
+      if (!mounted) return;
+      setState(() {
+        row.values
+          ..clear()
+          ..addAll(updated.values);
+        row.isNew = updated.isNew;
+        row.draftId = updated.draftId;
+        row.dirty = false;
+        row.changedKeys.clear();
+      });
+      _rebuildVisible();
+      widget.onUpdated();
+    } catch (exception) {
+      if (!mounted) return;
+      setState(() {
+        row.values
+          ..clear()
+          ..addAll(before);
+        row.dirty = beforeDirty;
+        row.changedKeys
+          ..clear()
+          ..addAll(beforeKeys);
+      });
+      widget.message('Cell was not saved: $exception');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
   }
 
-  void _addRow() {
-    final defaults =
-        kind == TableKind.bookings
-            ? <String, dynamic>{
-              'status': 'On hold',
-              'paymentStatus': 'Pending',
-              'total': 0,
-              'cost': 0,
-            }
-            : <String, dynamic>{
-              'status': 'Active',
-              'stock': 0,
-              'cost': 0,
-              'price': 0,
-              'unit': 'piece',
-            };
-    final row = SpreadsheetRow(defaults, isNew: true);
-    setState(() {
-      rows.insert(0, row);
-      selectedRow = row;
-      selectedKey = columns.firstWhere((column) => column.editable).key;
-    });
-    _rebuildVisible();
-    if (verticalController.hasClients) verticalController.jumpTo(0);
+  Future<void> _addRecord() async {
+    if (adding) return;
+    setState(() => adding = true);
+    try {
+      final module =
+          kind == TableKind.bookings ? 'bookings' : 'grocery_products';
+      final fields = await loadRecordFields(widget.api, module);
+      if (!mounted) return;
+      final data = await showRecordForm(
+        context,
+        kind == TableKind.bookings ? 'New booking' : 'New product',
+        fields,
+        api: widget.api,
+      );
+      if (data == null || !mounted) return;
+      if (kind == TableKind.bookings) data['manual'] = true;
+      await widget.api.post(kind.path, data);
+      if (!mounted) return;
+      await _load();
+      widget.onUpdated();
+      widget.message('Record added');
+    } catch (exception) {
+      if (mounted) widget.message('Could not add record: $exception');
+    } finally {
+      if (mounted) setState(() => adding = false);
+    }
   }
 
   void _duplicateRow() {
@@ -267,8 +413,8 @@ class TableScreenState extends State<TableScreen> {
     if (verticalController.hasClients) verticalController.jumpTo(0);
   }
 
-  Future<void> _deleteRow() async {
-    final row = selectedRow;
+  Future<void> _deleteRow([SpreadsheetRow? target]) async {
+    final row = target ?? selectedRow;
     if (row == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -306,6 +452,119 @@ class TableScreenState extends State<TableScreen> {
       widget.message('Row deleted');
     } catch (exception) {
       widget.message(exception.toString());
+    }
+  }
+
+  bool get canRearrangeRows =>
+      searchController.text.trim().isEmpty &&
+      filterController.text.trim().isEmpty &&
+      sortKey == null;
+
+  Future<void> _moveColumn(int index, int direction) async {
+    if (layoutSaving ||
+        index + direction < 0 ||
+        index + direction >= columns.length) {
+      return;
+    }
+    final next = columns.map((column) => column.key).toList();
+    final value = next.removeAt(index);
+    next.insert(index + direction, value);
+    setState(() {
+      columnOrder = next;
+      layoutSaving = true;
+    });
+    try {
+      final saved = await repository.saveLayout(
+        revision: layoutRevision,
+        columns: next,
+      );
+      if (mounted) {
+        setState(
+          () =>
+              layoutRevision =
+                  (saved['revision'] as num?)?.toInt() ?? layoutRevision + 1,
+        );
+      }
+    } catch (exception) {
+      if (mounted) {
+        widget.message('Column order was not saved: $exception');
+        await _load();
+      }
+    } finally {
+      if (mounted) setState(() => layoutSaving = false);
+    }
+  }
+
+  Future<void> _moveRow(int index, int direction) async {
+    if (layoutSaving ||
+        !canRearrangeRows ||
+        index + direction < 0 ||
+        index + direction >= visibleRows.length) {
+      return;
+    }
+    final row = visibleRows[index];
+    final other = visibleRows[index + direction];
+    final first = rows.indexOf(row);
+    final second = rows.indexOf(other);
+    if (first < 0 || second < 0) return;
+    final moved = [...rows];
+    moved[first] = other;
+    moved[second] = row;
+    final ids = moved.map((item) => item.draftId ?? item.id).toList();
+    if (ids.any((id) => id.isEmpty)) {
+      widget.message('Save new rows before rearranging them');
+      return;
+    }
+    setState(() {
+      rows = moved;
+      layoutSaving = true;
+    });
+    _rebuildVisible();
+    try {
+      final saved = await repository.saveLayout(
+        revision: layoutRevision,
+        rows: ids,
+      );
+      if (mounted) {
+        setState(
+          () =>
+              layoutRevision =
+                  (saved['revision'] as num?)?.toInt() ?? layoutRevision + 1,
+        );
+      }
+    } catch (exception) {
+      if (mounted) {
+        widget.message('Row order was not saved: $exception');
+        await _load();
+      }
+    } finally {
+      if (mounted) setState(() => layoutSaving = false);
+    }
+  }
+
+  Future<void> _resetLayout() async {
+    if (layoutSaving) return;
+    setState(() => layoutSaving = true);
+    try {
+      await repository.saveLayout(
+        revision: layoutRevision,
+        columns: [],
+        rows: [],
+      );
+      if (!mounted) return;
+      setState(() {
+        rearranging = false;
+        sortKey = null;
+        filterKey = null;
+        showFilter = false;
+        filterController.clear();
+      });
+      await _load();
+      widget.message('Table layout reset. Records were not changed.');
+    } catch (exception) {
+      if (mounted) widget.message('Could not reset layout: $exception');
+    } finally {
+      if (mounted) setState(() => layoutSaving = false);
     }
   }
 
@@ -554,55 +813,91 @@ class TableScreenState extends State<TableScreen> {
     }
   }
 
-  Widget _button(String label, IconData icon, VoidCallback? action) =>
-      OutlinedButton.icon(
-        onPressed: action,
-        icon: Icon(icon, size: 17),
-        label: Text(label),
-      );
+  Future<void> _showSpreadsheetTools() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder:
+          (sheetContext) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const ListTile(title: Text('Spreadsheet tools')),
+                for (final tool in const [
+                  ('save', 'Save pending rows', Icons.save_outlined),
+                  (
+                    'duplicate',
+                    'Duplicate selected row',
+                    Icons.copy_all_outlined,
+                  ),
+                  (
+                    'column',
+                    'Add legacy custom column',
+                    Icons.view_column_outlined,
+                  ),
+                  ('copy', 'Copy selected cell', Icons.content_copy_outlined),
+                  (
+                    'paste',
+                    'Paste into selected cell',
+                    Icons.content_paste_outlined,
+                  ),
+                  ('import', 'Import CSV', Icons.file_upload_outlined),
+                  ('export', 'Export CSV', Icons.file_download_outlined),
+                ])
+                  ListTile(
+                    leading: Icon(tool.$3),
+                    title: Text(tool.$2),
+                    onTap: () => Navigator.pop(sheetContext, tool.$1),
+                  ),
+              ],
+            ),
+          ),
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case 'save':
+        _save();
+      case 'duplicate':
+        _duplicateRow();
+      case 'column':
+        _addColumn();
+      case 'copy':
+        _copyCell();
+      case 'paste':
+        _pasteCell();
+      case 'import':
+        _importCsv();
+      case 'export':
+        _exportCsv();
+    }
+  }
 
   Widget _toolbar() {
     final theme = Theme.of(context);
-    final selectedColumn =
-        columns.where((column) => column.key == selectedKey).firstOrNull;
     return Container(
       color: theme.colorScheme.surface,
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
+          Row(
             children: [
-              _button('Add Row', Icons.add, _addRow),
-              _button(
-                'Delete Row',
-                Icons.delete_outline,
-                selectedRow == null ? null : _deleteRow,
+              Expanded(
+                child: Text(
+                  kind == TableKind.bookings
+                      ? 'Linked booking table'
+                      : 'Linked product table',
+                  style: theme.textTheme.titleMedium,
+                ),
               ),
-              _button(
-                'Duplicate Row',
-                Icons.copy_all_outlined,
-                selectedRow == null ? null : _duplicateRow,
+              IconButton(
+                tooltip: 'Spreadsheet tools',
+                onPressed: _showSpreadsheetTools,
+                icon: const Icon(Icons.settings_outlined),
               ),
-              _button('Add Column', Icons.view_column_outlined, _addColumn),
-              _button(
-                'Filter',
-                Icons.filter_alt_outlined,
-                () => setState(() => showFilter = !showFilter),
-              ),
-              FilledButton.icon(
-                onPressed: saving ? null : _save,
-                icon: const Icon(Icons.save_outlined, size: 17),
-                label: Text(saving ? 'Saving…' : 'Save'),
-              ),
-              _button('Import', Icons.file_upload_outlined, _importCsv),
-              _button('Export', Icons.file_download_outlined, _exportCsv),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Wrap(
             spacing: 12,
             runSpacing: 8,
@@ -619,82 +914,52 @@ class TableScreenState extends State<TableScreen> {
                   ),
                 ),
               ),
-              if (showFilter) ...[
-                SizedBox(
-                  width: 190,
-                  child: DropdownButtonFormField<String>(
-                    value: filterKey,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      labelText: 'Filter column',
-                    ),
-                    items:
-                        columns
-                            .map(
-                              (column) => DropdownMenuItem(
-                                value: column.key,
-                                child: Text(
-                                  column.label,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            )
-                            .toList(),
-                    onChanged: (value) {
-                      filterKey = value;
-                      _rebuildVisible();
-                    },
-                  ),
+              PopupMenuButton<String>(
+                tooltip: 'Table layout',
+                icon: const Icon(Icons.menu),
+                onSelected: (value) {
+                  if (value == 'rearrange') {
+                    setState(() {
+                      rearranging = !rearranging;
+                      if (rearranging) {
+                        editingRow = null;
+                        editingKey = null;
+                      }
+                    });
+                  } else if (value == 'reset') {
+                    _resetLayout();
+                  }
+                },
+                itemBuilder:
+                    (_) => [
+                      PopupMenuItem(
+                        value: 'rearrange',
+                        child: Text(
+                          rearranging ? 'Exit Rearrange' : 'Rearrange',
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'reset',
+                        child: Text('Reset Table Layout'),
+                      ),
+                    ],
+              ),
+              if (rearranging)
+                TextButton(
+                  onPressed: () => setState(() => rearranging = false),
+                  child: const Text('Done'),
                 ),
-                SizedBox(
-                  width: 200,
-                  child: TextField(
-                    controller: filterController,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      hintText: 'Contains…',
-                    ),
-                  ),
-                ),
-              ],
+              FilledButton.icon(
+                onPressed: adding ? null : _addRecord,
+                icon: const Icon(Icons.add, size: 17),
+                label: const Text('Add Record'),
+              ),
               Text(
                 '${visibleRows.length} rows${hasPendingChanges ? ' • Unsaved changes' : ''}',
                 style: theme.textTheme.bodySmall,
               ),
             ],
           ),
-          if (selectedRow != null && selectedColumn != null) ...[
-            const SizedBox(height: 9),
-            Wrap(
-              spacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  'Selected: ${selectedColumn.label}',
-                  style: theme.textTheme.bodySmall,
-                ),
-                TextButton.icon(
-                  onPressed:
-                      selectedColumn.editable
-                          ? () => _editCell(selectedRow!, selectedColumn)
-                          : null,
-                  icon: const Icon(Icons.edit_outlined, size: 15),
-                  label: const Text('Edit cell'),
-                ),
-                TextButton.icon(
-                  onPressed: _copyCell,
-                  icon: const Icon(Icons.content_copy_outlined, size: 15),
-                  label: const Text('Copy'),
-                ),
-                TextButton.icon(
-                  onPressed: selectedColumn.editable ? _pasteCell : null,
-                  icon: const Icon(Icons.content_paste_outlined, size: 15),
-                  label: const Text('Paste'),
-                ),
-              ],
-            ),
-          ],
         ],
       ),
     );
@@ -702,6 +967,7 @@ class TableScreenState extends State<TableScreen> {
 
   Widget _headerCell(TableColumnDef column) {
     final active = sortKey == column.key;
+    final index = columns.indexWhere((item) => item.key == column.key);
     return SizedBox(
       width: column.width,
       child: InkWell(
@@ -727,7 +993,36 @@ class TableScreenState extends State<TableScreen> {
                   ascending ? Icons.arrow_upward : Icons.arrow_downward,
                   size: 13,
                 ),
-              if (column.custom) const Icon(Icons.edit_outlined, size: 12),
+              if (rearranging) ...[
+                IconButton(
+                  tooltip: 'Move ${column.label} left',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(
+                    minWidth: 26,
+                    minHeight: 28,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.arrow_back, size: 16),
+                  onPressed:
+                      index == 0 || layoutSaving
+                          ? null
+                          : () => _moveColumn(index, -1),
+                ),
+                IconButton(
+                  tooltip: 'Move ${column.label} right',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(
+                    minWidth: 26,
+                    minHeight: 28,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.arrow_forward, size: 16),
+                  onPressed:
+                      index == columns.length - 1 || layoutSaving
+                          ? null
+                          : () => _moveColumn(index, 1),
+                ),
+              ],
             ],
           ),
         ),
@@ -744,8 +1039,6 @@ class TableScreenState extends State<TableScreen> {
       height: 46,
       child: InkWell(
         onTap: () => _select(row, column),
-        onDoubleTap: () => _editCell(row, column),
-        onLongPress: () => _editCell(row, column),
         child: Container(
           alignment: Alignment.centerLeft,
           padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -768,15 +1061,115 @@ class TableScreenState extends State<TableScreen> {
                       : BorderSide.none,
             ),
           ),
-          child: Text(
-            value,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 12.5,
-              fontWeight: row.isNew ? FontWeight.w600 : FontWeight.normal,
-            ),
-          ),
+          child:
+              editingRow == row && editingKey == column.key
+                  ? Row(
+                    children: [
+                      Expanded(
+                        child: Focus(
+                          onKeyEvent: (_, event) {
+                            if (event is KeyDownEvent &&
+                                event.logicalKey == LogicalKeyboardKey.escape) {
+                              _cancelInlineEdit();
+                              return KeyEventResult.handled;
+                            }
+                            return KeyEventResult.ignored;
+                          },
+                          child:
+                              column.type == TableValueType.choice ||
+                                      column.type == TableValueType.toggle
+                                  ? DropdownButton<String>(
+                                    isExpanded: true,
+                                    value:
+                                        column.type == TableValueType.toggle
+                                            ? (cellEditor.text == 'true'
+                                                ? 'true'
+                                                : 'false')
+                                            : column.choices.contains(
+                                              cellEditor.text,
+                                            )
+                                            ? cellEditor.text
+                                            : null,
+                                    items:
+                                        (column.type == TableValueType.toggle
+                                                ? const ['true', 'false']
+                                                : column.choices)
+                                            .map(
+                                              (choice) => DropdownMenuItem(
+                                                value: choice,
+                                                child: Text(
+                                                  choice,
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                            )
+                                            .toList(),
+                                    onChanged:
+                                        (value) => setState(
+                                          () => cellEditor.text = value ?? '',
+                                        ),
+                                  )
+                                  : TextField(
+                                    controller: cellEditor,
+                                    focusNode: cellFocus,
+                                    maxLines: 1,
+                                    keyboardType:
+                                        column.type == TableValueType.number
+                                            ? const TextInputType.numberWithOptions(
+                                              decimal: true,
+                                            )
+                                            : column.type == TableValueType.date
+                                            ? TextInputType.datetime
+                                            : TextInputType.text,
+                                    decoration: const InputDecoration(
+                                      isDense: true,
+                                      border: InputBorder.none,
+                                    ),
+                                    onSubmitted:
+                                        (_) => _saveInlineEdit(row, column),
+                                    onTapOutside: (_) => _cancelInlineEdit(),
+                                  ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Save cell',
+                        constraints: const BoxConstraints(
+                          minWidth: 24,
+                          minHeight: 28,
+                        ),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.check, size: 16),
+                        onPressed:
+                            saving ? null : () => _saveInlineEdit(row, column),
+                      ),
+                      IconButton(
+                        tooltip: 'Cancel edit',
+                        constraints: const BoxConstraints(
+                          minWidth: 24,
+                          minHeight: 28,
+                        ),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.close, size: 16),
+                        onPressed: _cancelInlineEdit,
+                      ),
+                    ],
+                  )
+                  : Tooltip(
+                    message: value,
+                    child: Text(
+                      value,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight:
+                            row.isNew ? FontWeight.w600 : FontWeight.normal,
+                      ),
+                    ),
+                  ),
         ),
       ),
     );
@@ -785,7 +1178,7 @@ class TableScreenState extends State<TableScreen> {
   Widget _grid() {
     final scheme = Theme.of(context).colorScheme;
     final tableWidth =
-        56 + columns.fold<double>(0, (sum, column) => sum + column.width);
+        164 + columns.fold<double>(0, (sum, column) => sum + column.width);
     return LayoutBuilder(
       builder:
           (context, constraints) => Scrollbar(
@@ -808,7 +1201,7 @@ class TableScreenState extends State<TableScreen> {
                       child: Row(
                         children: [
                           const SizedBox(
-                            width: 56,
+                            width: 100,
                             child: Center(
                               child: Text(
                                 'S.N',
@@ -820,6 +1213,7 @@ class TableScreenState extends State<TableScreen> {
                             ),
                           ),
                           ...columns.map(_headerCell),
+                          const SizedBox(width: 64),
                         ],
                       ),
                     ),
@@ -841,16 +1235,82 @@ class TableScreenState extends State<TableScreen> {
                               child: Row(
                                 children: [
                                   SizedBox(
-                                    width: 56,
-                                    child: Center(
-                                      child: Text(
-                                        '${index + 1}',
-                                        style: const TextStyle(fontSize: 12),
-                                      ),
-                                    ),
+                                    width: 100,
+                                    child:
+                                        rearranging
+                                            ? Row(
+                                              children: [
+                                                IconButton(
+                                                  tooltip: 'Move row up',
+                                                  constraints:
+                                                      const BoxConstraints(
+                                                        minWidth: 25,
+                                                        minHeight: 28,
+                                                      ),
+                                                  padding: EdgeInsets.zero,
+                                                  icon: const Icon(
+                                                    Icons.arrow_upward,
+                                                    size: 15,
+                                                  ),
+                                                  onPressed:
+                                                      index == 0 ||
+                                                              layoutSaving ||
+                                                              !canRearrangeRows
+                                                          ? null
+                                                          : () => _moveRow(
+                                                            index,
+                                                            -1,
+                                                          ),
+                                                ),
+                                                IconButton(
+                                                  tooltip: 'Move row down',
+                                                  constraints:
+                                                      const BoxConstraints(
+                                                        minWidth: 25,
+                                                        minHeight: 28,
+                                                      ),
+                                                  padding: EdgeInsets.zero,
+                                                  icon: const Icon(
+                                                    Icons.arrow_downward,
+                                                    size: 15,
+                                                  ),
+                                                  onPressed:
+                                                      index ==
+                                                                  visibleRows
+                                                                          .length -
+                                                                      1 ||
+                                                              layoutSaving ||
+                                                              !canRearrangeRows
+                                                          ? null
+                                                          : () => _moveRow(
+                                                            index,
+                                                            1,
+                                                          ),
+                                                ),
+                                              ],
+                                            )
+                                            : Center(
+                                              child: Text(
+                                                '${index + 1}',
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ),
                                   ),
                                   ...columns.map(
                                     (column) => _rowCell(row, column),
+                                  ),
+                                  SizedBox(
+                                    width: 64,
+                                    child: IconButton(
+                                      tooltip: 'Delete row',
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        size: 18,
+                                      ),
+                                      onPressed: () => _deleteRow(row),
+                                    ),
                                   ),
                                 ],
                               ),
@@ -903,9 +1363,9 @@ class TableScreenState extends State<TableScreen> {
               visibleRows.isEmpty
                   ? Center(
                     child: Text(
-                      rows.isEmpty
-                          ? 'No ${kind == TableKind.bookings ? 'bookings' : 'products'} yet. Use Add Row or Import.'
-                          : 'No rows match your search or filter.',
+                      rows.isEmpty && searchController.text.trim().isEmpty
+                          ? 'No ${kind == TableKind.bookings ? 'bookings' : 'products'} yet. Use Add Record or Import.'
+                          : 'No matching records found.',
                     ),
                   )
                   : _grid(),
@@ -1044,93 +1504,6 @@ class _TableSetupViewState extends State<_TableSetupView> {
         ),
       ),
     ),
-  );
-}
-
-class _CellEditorDialog extends StatefulWidget {
-  const _CellEditorDialog({required this.column, required this.initial});
-
-  final TableColumnDef column;
-  final String initial;
-
-  @override
-  State<_CellEditorDialog> createState() => _CellEditorDialogState();
-}
-
-class _CellEditorDialogState extends State<_CellEditorDialog> {
-  late final TextEditingController controller;
-  String? choice;
-
-  @override
-  void initState() {
-    super.initState();
-    controller = TextEditingController(text: widget.initial);
-    choice =
-        widget.column.choices.contains(widget.initial) ? widget.initial : null;
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: Text('Edit ${widget.column.label}'),
-    content: SizedBox(
-      width: 430,
-      child:
-          widget.column.type == TableValueType.choice
-              ? DropdownButtonFormField<String>(
-                value: choice,
-                decoration: InputDecoration(labelText: widget.column.label),
-                items:
-                    widget.column.choices
-                        .map(
-                          (value) => DropdownMenuItem(
-                            value: value,
-                            child: Text(value),
-                          ),
-                        )
-                        .toList(),
-                onChanged: (value) => setState(() => choice = value),
-              )
-              : TextField(
-                controller: controller,
-                autofocus: true,
-                maxLines: widget.column.type == TableValueType.longText ? 6 : 1,
-                keyboardType:
-                    widget.column.type == TableValueType.number
-                        ? const TextInputType.numberWithOptions(decimal: true)
-                        : widget.column.type == TableValueType.longText
-                        ? TextInputType.multiline
-                        : TextInputType.text,
-                decoration: InputDecoration(
-                  labelText: widget.column.label,
-                  hintText:
-                      widget.column.type == TableValueType.date
-                          ? 'YYYY-MM-DD'
-                          : null,
-                ),
-              ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        onPressed:
-            () => Navigator.pop(
-              context,
-              widget.column.type == TableValueType.choice
-                  ? choice ?? ''
-                  : controller.text.trim(),
-            ),
-        child: const Text('Apply'),
-      ),
-    ],
   );
 }
 

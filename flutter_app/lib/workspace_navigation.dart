@@ -166,12 +166,19 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
       String id,
       String title,
       IconData icon,
-      List<_NavNode?> entries,
-    ) {
+      List<_NavNode?> entries, {
+      String? defaultModuleKey,
+    }) {
       final children = entries.whereType<_NavNode>().toList();
       return children.isEmpty
           ? null
-          : _NavNode(id, title, icon, children: children);
+          : _NavNode(
+            id,
+            title,
+            icon,
+            module: defaultModuleKey == null ? null : byKey[defaultModuleKey],
+            children: children,
+          );
     }
 
     final entries =
@@ -214,16 +221,12 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
                 'Travel operations',
                 Icons.flight_takeoff_outlined,
                 [
-                  group(
-                    'travel_bookings',
-                    'Bookings',
-                    Icons.airplane_ticket_outlined,
-                    [leaf('bookings')],
-                  ),
+                  leaf('bookings'),
                   leaf('passports'),
                   leaf('refunds'),
                   leaf('cases'),
                 ],
+                defaultModuleKey: 'bookings',
               ),
               tableNode(),
               leaf('company_assets'),
@@ -426,6 +429,7 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
             ? node.tableId == widget.selectedTableId &&
                 widget.selectedKey == 'table'
             : node.module?.key == widget.selectedKey &&
+                node.id != 'travel' &&
                 (node.id != 'table_all' || widget.selectedTableId == null) &&
                 (node.id != 'table_root' || widget.selectedTableId == null);
     final containsSelected = _containsSelected(node);
@@ -443,6 +447,9 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
               onTap: () {
                 if (node.isGroup) {
                   expanded.add(node.id);
+                  if (node.id == 'travel' && node.module != null) {
+                    widget.onNavigate(node.module!);
+                  }
                   widget.onToggleCollapsed();
                 } else if (node.tableId != null) {
                   widget.onSelectTable?.call(node.tableId);
@@ -483,9 +490,14 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
               onTap: () {
                 if (node.isGroup) {
                   setState(() {
-                    if (!expanded.add(node.id)) expanded.remove(node.id);
+                    if (node.id == 'travel') {
+                      expanded.add(node.id);
+                    } else if (!expanded.add(node.id)) {
+                      expanded.remove(node.id);
+                    }
                   });
-                  if (node.id == 'table_root' && node.module != null) {
+                  if ((node.id == 'table_root' || node.id == 'travel') &&
+                      node.module != null) {
                     widget.onNavigate(node.module!);
                   }
                 } else if (node.tableId != null) {
@@ -532,13 +544,38 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
                         ),
                       ),
                       if (node.isGroup)
-                        Icon(
-                          open
-                              ? Icons.keyboard_arrow_down_rounded
-                              : Icons.chevron_right_rounded,
-                          size: 19,
-                          color: selected ? Colors.white : _navMuted,
-                        ),
+                        node.id == 'travel'
+                            ? IconButton(
+                              tooltip:
+                                  open
+                                      ? 'Collapse Travel operations'
+                                      : 'Expand Travel operations',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 32,
+                                height: 32,
+                              ),
+                              onPressed:
+                                  () => setState(() {
+                                    if (!expanded.add(node.id)) {
+                                      expanded.remove(node.id);
+                                    }
+                                  }),
+                              icon: Icon(
+                                open
+                                    ? Icons.keyboard_arrow_down_rounded
+                                    : Icons.chevron_right_rounded,
+                                size: 19,
+                                color: selected ? Colors.white : _navMuted,
+                              ),
+                            )
+                            : Icon(
+                              open
+                                  ? Icons.keyboard_arrow_down_rounded
+                                  : Icons.chevron_right_rounded,
+                              size: 19,
+                              color: selected ? Colors.white : _navMuted,
+                            ),
                     ],
                   ),
                 ),

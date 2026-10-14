@@ -25,11 +25,15 @@ class _FakeApi extends ApiClient {
 
 class _EditableApi extends ApiClient {
   Map<String, dynamic>? lastSave;
+  String? searchPath;
+  bool failPatch = false;
   final table = <String, dynamic>{
     'id': 'T-3',
     'name': 'Three by three',
     'platform': 'airline',
     'revision': 1,
+    'defaultColumnIds': ['C-1', 'C-2', 'C-3'],
+    'defaultRowIds': ['R-1', 'R-2', 'R-3'],
     'columns': [
       {'id': 'C-1', 'label': 'A'},
       {'id': 'C-2', 'label': 'B'},
@@ -43,10 +47,24 @@ class _EditableApi extends ApiClient {
   };
 
   @override
-  Future<dynamic> get(String path) async => table;
+  Future<dynamic> get(String path) async {
+    if (path.contains('/search?query=')) {
+      searchPath = path;
+      final query = Uri.parse(path).queryParameters['query']!.toLowerCase();
+      return [
+        for (final row in table['rows'] as List)
+          if ((row['cells'] as Map).values.any(
+            (value) => value.toString().toLowerCase().contains(query),
+          ))
+            row['id'],
+      ];
+    }
+    return table;
+  }
 
   @override
   Future<dynamic> patch(String path, Object body) async {
+    if (failPatch) throw StateError('Server refused the save');
     lastSave = Map<String, dynamic>.from(body as Map);
     table.addAll(lastSave!);
     table['revision'] = (lastSave!['revision'] as int) + 1;
@@ -71,57 +89,99 @@ Widget _editor(_EditableApi api, {ValueChanged<String>? onMessage}) =>
     );
 
 void main() {
-  testWidgets('a row number selects a row and deletion persists', (
-    tester,
-  ) async {
+  testWidgets('row delete action confirms and persists', (tester) async {
     final api = _EditableApi();
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('2').first);
-    await tester.pump();
-    expect(find.text('Row 2 selected'), findsOneWidget);
-    await tester.tap(find.text('Delete Row'));
-    await tester.pump();
-    await tester.tap(find.text('Save'));
+    await tester.tap(find.byTooltip('Delete row').at(1));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete row').last);
     await tester.pumpAndSettle();
     expect((api.lastSave!['rows'] as List).length, 2);
   });
 
-  testWidgets('a column header selects a column and deletion persists', (
-    tester,
-  ) async {
+  testWidgets('failed row deletion restores the saved row', (tester) async {
+    final api = _EditableApi()..failPatch = true;
+    String? message;
+    await tester.pumpWidget(
+      _editor(api, onMessage: (value) => message = value),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Delete row').at(1));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete row').last);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Row 1 actions'), findsOneWidget);
+    expect(find.byTooltip('Row 2 actions'), findsOneWidget);
+    expect(find.byTooltip('Row 3 actions'), findsOneWidget);
+    expect(message, contains('changes reverted'));
+  });
+
+  testWidgets('column menu deletes and persists the column', (tester) async {
     final api = _EditableApi();
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('B'));
-    await tester.pump();
-    expect(find.text('Column 2 selected'), findsOneWidget);
-    await tester.tap(find.text('Delete Column'));
+    await tester.tap(find.byTooltip('Column actions').at(1));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete column'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete').last);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
     expect((api.lastSave!['columns'] as List).length, 2);
+  });
+
+  testWidgets('restoring a removed field shows its saved values', (
+    tester,
+  ) async {
+    final api = _EditableApi();
+    api.table['archivedColumns'] = [
+      {'id': 'C-4', 'label': 'Old reference'},
+    ];
+    (api.table['rows'] as List).first['cells']['C-4'] = 'Stored value';
+    await tester.pumpWidget(_editor(api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Add form field'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Restore Old reference'));
+    await tester.pumpAndSettle();
+
+    expect((api.lastSave!['columns'] as List).last['id'], 'C-4');
+    expect(find.text('Stored value'), findsOneWidget);
+  });
+
+  testWidgets('search is debounced and includes rows outside the viewport', (
+    tester,
+  ) async {
+    final api = _EditableApi();
+    (api.table['rows'] as List).last['cells']['C-1'] = 'Long distance flight';
+    await tester.pumpWidget(_editor(api));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Search this table'),
+      'DISTANCE',
+    );
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+    expect(api.searchPath, contains('query=DISTANCE'));
+    expect(find.text('Long distance flight'), findsOneWidget);
   });
 
   testWidgets('row and column colors are saved', (tester) async {
     final api = _EditableApi();
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('1').first);
-    await tester.pump();
-    await tester.tap(find.text('Row color'));
+    await tester.tap(find.byTooltip('Row 1 actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Color row'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('palette-Blue')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('A'));
-    await tester.pump();
-    await tester.tap(find.text('Column color'));
+    await tester.tap(find.byTooltip('Column actions').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Color column'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('palette-Green')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     expect((api.lastSave!['rows'] as List).first['color'], '#DDEBFF');
     expect((api.lastSave!['columns'] as List).first['color'], '#DDF5E8');
@@ -138,10 +198,7 @@ void main() {
     expect(find.text('Delete row'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('row-action-color-R-2')));
     await tester.pumpAndSettle();
-    expect(find.text('Row 2 selected'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('palette-Green')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
 
     final rows = api.lastSave!['rows'] as List;
@@ -162,7 +219,7 @@ void main() {
     expect(find.byType(DatePickerDialog), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
-    expect(find.text('Row 3 selected'), findsOneWidget);
+    expect(find.byTooltip('Row 3 actions'), findsOneWidget);
   });
 
   testWidgets('one tap types in a cell without opening a dialog', (
@@ -180,6 +237,8 @@ void main() {
       find.byKey(const ValueKey('table-cell-editor')),
       'First cell',
     );
+    await tester.tap(find.byTooltip('Save cell'));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-2')));
     await tester.pump();
@@ -187,7 +246,7 @@ void main() {
       find.byKey(const ValueKey('table-cell-editor')),
       'Second cell',
     );
-    await tester.tap(find.text('Save'));
+    await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
 
     final rows = api.lastSave!['rows'] as List;
@@ -201,9 +260,7 @@ void main() {
     expect(find.text('Second cell'), findsOneWidget);
   });
 
-  testWidgets('Enter text can span lines and Next row keeps the column', (
-    tester,
-  ) async {
+  testWidgets('Enter saves a compact single-line cell', (tester) async {
     final api = _EditableApi();
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
@@ -217,80 +274,40 @@ void main() {
     );
     await tester.enterText(editor, 'First line');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
-    expect(tester.widget<TextField>(editor).controller!.text, 'First line\n');
-    await tester.enterText(editor, 'First line\nSecond line');
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(
       tester.getSize(find.byKey(const ValueKey('table-cell-R-1-C-1'))).height,
-      greaterThan(52),
+      52,
     );
-
-    await tester.tap(find.text('Next row'));
-    await tester.pump();
-    expect(find.byKey(const ValueKey('table-cell-editor')), findsOneWidget);
-    await tester.enterText(editor, 'Following row');
-    await tester.tap(find.text('Save'));
-    await tester.pumpAndSettle();
-
     final rows = api.lastSave!['rows'] as List;
-    expect((rows[0] as Map)['cells']['C-1'], 'First line\nSecond line');
-    expect((rows[1] as Map)['cells']['C-1'], 'Following row');
+    expect((rows[0] as Map)['cells']['C-1'], 'First line');
   });
 
-  testWidgets('notification control explains selection and opens the picker', (
-    tester,
-  ) async {
-    String? message;
-    await tester.pumpWidget(
-      _editor(_EditableApi(), onMessage: (value) => message = value),
-    );
+  testWidgets('row notification action opens the picker', (tester) async {
+    await tester.pumpWidget(_editor(_EditableApi()));
     await tester.pumpAndSettle();
-    final notification = find.ancestor(
-      of: find.text('Set notification'),
-      matching: find.bySubtype<OutlinedButton>(),
-    );
-    expect(notification, findsOneWidget);
-    await tester.tap(notification);
-    await tester.pump();
-    expect(message, contains('Select a row number or cell'));
-
-    await tester.tap(find.text('1').first);
-    await tester.pump();
-    expect(tester.widget<OutlinedButton>(notification).onPressed, isNotNull);
-    await tester.tap(notification);
+    await tester.tap(find.byTooltip('Row 1 actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Set notification'));
     await tester.pumpAndSettle();
     expect(find.byType(DatePickerDialog), findsOneWidget);
   });
 
-  testWidgets('common tools stay separate from selection actions', (
+  testWidgets('toolbar has one layout menu and a table field action', (
     tester,
   ) async {
     final api = _EditableApi();
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
 
-    expect(find.text('Add Row'), findsOneWidget);
-    expect(find.text('Add Column'), findsOneWidget);
-    expect(find.text('Import / Export'), findsOneWidget);
-    expect(find.text('Delete Row'), findsNothing);
-
-    await tester.tap(find.text('1').first);
-    await tester.pump();
-    expect(find.text('Row 1 selected'), findsOneWidget);
-    expect(find.text('Delete Row'), findsOneWidget);
-    expect(find.text('Delete Column'), findsNothing);
-
-    await tester.tap(find.text('A'));
-    await tester.pump();
-    expect(find.text('Column 1 selected'), findsOneWidget);
-    expect(find.text('Delete Column'), findsOneWidget);
-    expect(find.text('Delete Row'), findsNothing);
-
-    await tester.tap(find.text('Import / Export'));
+    expect(find.text('Add Record'), findsOneWidget);
+    expect(find.byTooltip('Add form field'), findsOneWidget);
+    expect(find.byTooltip('Table layout'), findsOneWidget);
+    expect(find.text('Import / Export'), findsNothing);
+    await tester.tap(find.byTooltip('Table layout'));
     await tester.pumpAndSettle();
-    expect(find.text('Import CSV'), findsOneWidget);
-    expect(find.text('Export CSV'), findsOneWidget);
+    expect(find.text('Rearrange'), findsOneWidget);
+    expect(find.text('Reset Table Layout'), findsOneWidget);
   });
 
   testWidgets('table editor fits a narrow screen without layout errors', (
@@ -307,14 +324,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('Three by three'), findsOneWidget);
-    expect(find.text('Add Row'), findsOneWidget);
-    expect(find.text('Save'), findsOneWidget);
-    await tester.tap(find.text('1').first);
-    await tester.pump();
-    await tester.tap(find.text('Row actions'));
+    expect(find.text('Add Record'), findsOneWidget);
+    await tester.tap(find.byTooltip('Row 1 actions'));
     await tester.pumpAndSettle();
-    expect(find.text('Delete Row'), findsOneWidget);
-    expect(find.text('Set notification'), findsWidgets);
+    expect(find.text('Delete row'), findsOneWidget);
+    expect(find.text('Set notification'), findsOneWidget);
   });
 
   testWidgets('row three-dot menu is usable on a phone', (tester) async {
@@ -350,18 +364,46 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-1')));
     await tester.pump();
-    expect(find.text('Next row'), findsOneWidget);
+    expect(find.byKey(const ValueKey('table-cell-editor')), findsOneWidget);
     await tester.enterText(
       find.byKey(const ValueKey('table-cell-editor')),
       'Typed on phone',
     );
-    await tester.ensureVisible(find.text('Save'));
-    await tester.tap(find.text('Save'));
+    await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
 
     final rows = api.lastSave!['rows'] as List;
     expect((rows.first as Map)['cells']['C-1'], 'Typed on phone');
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('named table rearranges and resets row and column layout', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1300, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _EditableApi();
+    await tester.pumpWidget(_editor(api));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Table layout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rearrange'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Move column right').first);
+    await tester.pumpAndSettle();
+    expect((api.lastSave!['columns'] as List).first['id'], 'C-2');
+    await tester.tap(find.byTooltip('Move row down').first);
+    await tester.pumpAndSettle();
+    expect((api.lastSave!['rows'] as List).first['id'], 'R-2');
+    await tester.tap(find.byTooltip('Table layout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reset Table Layout'));
+    await tester.pumpAndSettle();
+    expect(api.lastSave!['resetColumnOrder'], true);
+    expect((api.lastSave!['columns'] as List).first['id'], 'C-1');
+    expect((api.lastSave!['rows'] as List).first['id'], 'R-1');
   });
 
   testWidgets('creation asks for sidebar name and editable headings', (

@@ -41,6 +41,37 @@ Widget navigationHarness({
 );
 
 void main() {
+  testWidgets('Travel operations opens Bookings & tickets in one tap', (
+    tester,
+  ) async {
+    String? destination;
+    await tester.pumpWidget(
+      navigationHarness(onNavigate: (module) => destination = module.key),
+    );
+
+    await tester.tap(find.text('Travel operations'));
+    await tester.pumpAndSettle();
+
+    expect(destination, 'bookings');
+    expect(find.text('Bookings & tickets'), findsOneWidget);
+    expect(find.text('Bookings'), findsNothing);
+    expect(find.text('Passport services'), findsOneWidget);
+  });
+
+  testWidgets('Travel operations arrow only expands the menu', (tester) async {
+    String? destination;
+    await tester.pumpWidget(
+      navigationHarness(onNavigate: (module) => destination = module.key),
+    );
+    await tester.tap(find.byTooltip('Expand Travel operations'));
+    await tester.pumpAndSettle();
+    expect(destination, isNull);
+    expect(find.text('Bookings & tickets'), findsOneWidget);
+    await tester.tap(find.byTooltip('Collapse Travel operations'));
+    await tester.pumpAndSettle();
+    expect(find.text('Bookings & tickets'), findsNothing);
+  });
+
   testWidgets('Company Assets opens from AeroDesk and FreshMart sidebars', (
     tester,
   ) async {

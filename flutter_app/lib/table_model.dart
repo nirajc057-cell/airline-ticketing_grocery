@@ -1,6 +1,6 @@
 enum TableKind { bookings, products }
 
-enum TableValueType { text, number, date, choice, longText }
+enum TableValueType { text, number, date, choice, longText, toggle }
 
 bool isNonNegativeNumber(String value) {
   final number = num.tryParse(value);

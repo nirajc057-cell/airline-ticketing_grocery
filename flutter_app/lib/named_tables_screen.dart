@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -9,6 +10,8 @@ import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'api.dart';
+import 'form_sheet.dart';
+import 'modules.dart';
 import 'named_table_repository.dart';
 
 enum _TableSelection { none, row, column, cell }
@@ -48,6 +51,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   final horizontal = ScrollController();
   final vertical = ScrollController();
   NamedTable? table;
+  NamedTable? persistedTable;
   String? selectedRowId;
   String? selectedColumnId;
   String? editingRowId;
@@ -60,9 +64,14 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   bool saving = false;
   bool dirty = false;
   bool showFilter = false;
+  bool rearranging = false;
+  bool addingRow = false;
   String? error;
   int loadSerial = 0;
   int localId = 0;
+  Timer? searchTimer;
+  Set<String>? serverSearchIds;
+  int searchSerial = 0;
 
   NamedTableRow? get selectedRow =>
       table?.rows.where((row) => row.id == selectedRowId).firstOrNull;
@@ -79,7 +88,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   void initState() {
     super.initState();
     repository = NamedTableRepository(widget.api);
-    search.addListener(_refresh);
+    search.addListener(_onSearchChanged);
     filter.addListener(_refresh);
     _load();
   }
@@ -108,7 +117,9 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   @override
   void dispose() {
     loadSerial++;
-    search.removeListener(_refresh);
+    searchSerial++;
+    searchTimer?.cancel();
+    search.removeListener(_onSearchChanged);
     filter.removeListener(_refresh);
     search.dispose();
     filter.dispose();
@@ -123,6 +134,35 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     if (mounted) setState(() {});
   }
 
+  void _onSearchChanged() {
+    searchTimer?.cancel();
+    searchSerial++;
+    serverSearchIds = null;
+    _refresh();
+    if (search.text.trim().isNotEmpty) {
+      searchTimer = Timer(const Duration(milliseconds: 300), _searchRemote);
+    }
+  }
+
+  Future<void> _searchRemote() async {
+    final current = table;
+    final query = search.text.trim();
+    if (current == null || query.isEmpty) return;
+    final serial = ++searchSerial;
+    try {
+      final ids = await repository.search(current.id, query);
+      if (!mounted ||
+          serial != searchSerial ||
+          widget.selectedTableId != current.id ||
+          search.text.trim() != query) {
+        return;
+      }
+      setState(() => serverSearchIds = ids);
+    } catch (_) {
+      // Older servers still use the complete table already loaded locally.
+    }
+  }
+
   Future<void> _load() async {
     final serial = ++loadSerial;
     final id = widget.selectedTableId;
@@ -130,6 +170,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       if (mounted) {
         setState(() {
           table = null;
+          persistedTable = null;
           loading = false;
           dirty = false;
           error = null;
@@ -141,6 +182,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       loading = true;
       error = null;
       table = null;
+      persistedTable = null;
       dirty = false;
     });
     try {
@@ -151,8 +193,10 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       }
       setState(() {
         table = loaded;
+        persistedTable = loaded.copy();
         loading = false;
       });
+      if (search.text.trim().isNotEmpty) _onSearchChanged();
     } catch (exception) {
       if (mounted && serial == loadSerial) {
         setState(() {
@@ -238,6 +282,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       if (!mounted) return;
       setState(() {
         table = null;
+        persistedTable = null;
         dirty = false;
       });
       widget.onTablesChanged();
@@ -248,24 +293,172 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     }
   }
 
-  Future<void> _save() async {
+  Future<void> _showTableTools() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder:
+          (sheetContext) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const ListTile(title: Text('Table tools')),
+                for (final tool in const [
+                  ('rename', 'Rename table', Icons.drive_file_rename_outline),
+                  ('import', 'Import CSV', Icons.file_upload_outlined),
+                  ('export', 'Export CSV', Icons.file_download_outlined),
+                  ('copy', 'Copy selected cell', Icons.content_copy_outlined),
+                  (
+                    'paste',
+                    'Paste into selected cell',
+                    Icons.content_paste_outlined,
+                  ),
+                  ('delete', 'Delete table', Icons.delete_outline),
+                ])
+                  ListTile(
+                    leading: Icon(tool.$3),
+                    title: Text(tool.$2),
+                    onTap: () => Navigator.pop(sheetContext, tool.$1),
+                  ),
+              ],
+            ),
+          ),
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case 'rename':
+        _renameTable();
+      case 'import':
+        _importCsv();
+      case 'export':
+        _exportCsv();
+      case 'copy':
+        _copy();
+      case 'paste':
+        _paste();
+      case 'delete':
+        _deleteTable();
+    }
+  }
+
+  Future<bool> _save({bool resetColumnOrder = false}) async {
     final current = table;
-    if (current == null || saving) return;
+    if (current == null || saving) return false;
     _finishInlineEdit();
     setState(() => saving = true);
     try {
-      final saved = await repository.save(current);
-      if (!mounted || widget.selectedTableId != saved.id) return;
+      final saved = await repository.save(
+        current,
+        resetColumnOrder: resetColumnOrder,
+      );
+      if (!mounted || widget.selectedTableId != saved.id) return false;
       setState(() {
         table = saved;
+        persistedTable = saved.copy();
         dirty = false;
+        serverSearchIds = null;
       });
+      if (search.text.trim().isNotEmpty) _onSearchChanged();
       widget.onTablesChanged();
       widget.message('Table saved');
+      return true;
     } catch (exception) {
-      if (mounted) widget.message('Save failed: $exception');
+      if (mounted) {
+        setState(() {
+          table = persistedTable?.copy();
+          dirty = false;
+          selectedRowId = null;
+          selectedColumnId = null;
+          editingRowId = null;
+          editingColumnId = null;
+        });
+        widget.message('Save failed; changes reverted: $exception');
+      }
+      return false;
     } finally {
       if (mounted) setState(() => saving = false);
+    }
+  }
+
+  bool get canRearrangeRows =>
+      search.text.trim().isEmpty &&
+      filter.text.trim().isEmpty &&
+      sortColumnId == null;
+
+  Future<void> _moveColumn(int index, int direction) async {
+    final current = table;
+    if (current == null ||
+        saving ||
+        index + direction < 0 ||
+        index + direction >= current.columns.length) {
+      return;
+    }
+    _finishInlineEdit();
+    setState(() {
+      final moved = current.columns.removeAt(index);
+      current.columns.insert(index + direction, moved);
+      dirty = true;
+    });
+    await _save();
+  }
+
+  Future<void> _moveRow(int index, int direction) async {
+    final current = table;
+    if (current == null ||
+        saving ||
+        !canRearrangeRows ||
+        index + direction < 0 ||
+        index + direction >= current.rows.length) {
+      return;
+    }
+    _finishInlineEdit();
+    setState(() {
+      final moved = current.rows.removeAt(index);
+      current.rows.insert(index + direction, moved);
+      dirty = true;
+    });
+    await _save();
+  }
+
+  Future<void> _resetLayout() async {
+    final current = table;
+    if (current == null || saving) return;
+    _finishInlineEdit();
+    final columnPositions = {
+      for (var index = 0; index < current.defaultColumnIds.length; index++)
+        current.defaultColumnIds[index]: index,
+    };
+    final rowPositions = {
+      for (var index = 0; index < current.defaultRowIds.length; index++)
+        current.defaultRowIds[index]: index,
+    };
+    final priorColumns = [...current.columns];
+    final priorRows = [...current.rows];
+    setState(() {
+      current.columns.sort(
+        (a, b) => (columnPositions[a.id] ??
+                current.defaultColumnIds.length + priorColumns.indexOf(a))
+            .compareTo(
+              columnPositions[b.id] ??
+                  current.defaultColumnIds.length + priorColumns.indexOf(b),
+            ),
+      );
+      current.rows.sort(
+        (a, b) => (rowPositions[a.id] ??
+                current.defaultRowIds.length + priorRows.indexOf(a))
+            .compareTo(
+              rowPositions[b.id] ??
+                  current.defaultRowIds.length + priorRows.indexOf(b),
+            ),
+      );
+      sortColumnId = null;
+      filterColumnId = null;
+      filter.clear();
+      rearranging = false;
+      dirty = true;
+    });
+    if (await _save(resetColumnOrder: true) && mounted) {
+      widget.message('Table layout reset; record values retained');
     }
   }
 
@@ -280,6 +473,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       column.label = label.trim();
       dirty = true;
     });
+    await _save();
   }
 
   static const palette = <String, String>{
@@ -353,6 +547,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       row.color = color.isEmpty ? null : color;
       dirty = true;
     });
+    await _save();
   }
 
   void _selectRowForAction(NamedTableRow row) {
@@ -372,6 +567,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       column.color = color.isEmpty ? null : color;
       dirty = true;
     });
+    await _save();
   }
 
   String _formatReminder(String? value) {
@@ -416,35 +612,85 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       row.notifyAt = when.toUtc().toIso8601String();
       dirty = true;
     });
-    widget.message(
-      'Notification set for ${_formatReminder(row.notifyAt)}. Save the table.',
-    );
+    widget.message('Notification set for ${_formatReminder(row.notifyAt)}.');
+    await _save();
   }
 
-  void _clearReminder() {
+  Future<void> _clearReminder() async {
     final row = selectedRow;
     if (row == null || row.notifyAt == null) return;
     setState(() {
       row.notifyAt = null;
       dirty = true;
     });
+    await _save();
   }
 
-  void _addColumn() {
+  Future<void> _addColumn() async {
     final current = table;
     if (current == null || current.columns.length >= 50) {
       widget.message('Maximum 50 columns');
       return;
     }
+    if (current.archivedColumns.isNotEmpty) {
+      final choice = await showModalBottomSheet<String>(
+        context: context,
+        showDragHandle: true,
+        builder:
+            (sheetContext) => SafeArea(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  ListTile(
+                    title: const Text('Create new field'),
+                    leading: const Icon(Icons.add),
+                    onTap: () => Navigator.pop(sheetContext, 'new'),
+                  ),
+                  for (final column in current.archivedColumns)
+                    ListTile(
+                      title: Text('Restore ${column.label}'),
+                      subtitle: const Text('Previous cell values will return'),
+                      leading: const Icon(Icons.restore),
+                      onTap: () => Navigator.pop(sheetContext, column.id),
+                    ),
+                ],
+              ),
+            ),
+      );
+      if (!mounted || choice == null) return;
+      if (choice != 'new') {
+        final archived =
+            current.archivedColumns
+                .where((column) => column.id == choice)
+                .firstOrNull;
+        if (archived == null) return;
+        _finishInlineEdit();
+        setState(() {
+          current.archivedColumns.remove(archived);
+          current.columns.add(archived);
+          dirty = true;
+          selectedColumnId = archived.id;
+          _selection = _TableSelection.column;
+        });
+        await _save();
+        return;
+      }
+    }
+    final label = await _ask('Name column', '');
+    if (!mounted || label == null || label.trim().isEmpty) return;
+    if (label.trim().length > 80) {
+      widget.message('Column name must be at most 80 characters');
+      return;
+    }
     _finishInlineEdit();
-    final column = NamedTableColumn(_newId('COL'), '');
+    final column = NamedTableColumn(_newId('COL'), label.trim());
     setState(() {
       current.columns.add(column);
       dirty = true;
       selectedColumnId = column.id;
       _selection = _TableSelection.column;
     });
-    _editHeader(column);
+    await _save();
   }
 
   Future<void> _deleteColumn() async {
@@ -464,7 +710,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
           (dialogContext) => AlertDialog(
             title: const Text('Delete column?'),
             content: Text(
-              'All values in ${column.label.isEmpty ? 'this column' : column.label} will be removed.',
+              'This hides ${column.label.isEmpty ? 'this column' : column.label} from the table. Saved cell values are retained.',
             ),
             actions: [
               TextButton(
@@ -481,34 +727,52 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     if (confirmed != true || !mounted) return;
     setState(() {
       current.columns.removeWhere((item) => item.id == id);
-      for (final row in current.rows) {
-        row.cells.remove(id);
-      }
+      current.archivedColumns.add(column);
       selectedColumnId = null;
       _selection = _TableSelection.none;
       filterColumnId = filterColumnId == id ? null : filterColumnId;
       sortColumnId = sortColumnId == id ? null : sortColumnId;
       dirty = true;
     });
+    await _save();
   }
 
-  void _addRow() {
+  Future<void> _addRow() async {
     final current = table;
-    if (current == null || current.rows.length >= 5000) {
+    if (current == null || addingRow || current.rows.length >= 5000) {
       widget.message('Maximum 5000 rows');
       return;
     }
     _finishInlineEdit();
-    final row = NamedTableRow(_newId('ROW'), {});
-    setState(() {
-      current.rows.add(row);
-      selectedRowId = row.id;
-      _selection = _TableSelection.row;
-      dirty = true;
-    });
+    setState(() => addingRow = true);
+    try {
+      final result = await showRecordForm(context, 'Add Record', [
+        for (var index = 0; index < current.columns.length; index++)
+          FieldSpec(
+            current.columns[index].id,
+            current.columns[index].label.isEmpty
+                ? 'Column ${index + 1}'
+                : current.columns[index].label,
+          ),
+      ]);
+      if (result == null || !mounted) return;
+      final row = NamedTableRow(_newId('ROW'), {
+        for (final entry in result.entries)
+          entry.key: entry.value?.toString() ?? '',
+      });
+      setState(() {
+        current.rows.add(row);
+        selectedRowId = row.id;
+        _selection = _TableSelection.row;
+        dirty = true;
+      });
+      await _save();
+    } finally {
+      if (mounted) setState(() => addingRow = false);
+    }
   }
 
-  void _duplicateRow() {
+  Future<void> _duplicateRow() async {
     _finishInlineEdit();
     final current = table;
     final selected =
@@ -527,6 +791,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       _selection = _TableSelection.row;
       dirty = true;
     });
+    await _save();
   }
 
   Future<void> _deleteRow() async {
@@ -534,36 +799,34 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     final current = table;
     final row = selectedRow;
     if (current == null || row == null) return;
-    if (row.cells.values.any((value) => value.isNotEmpty) ||
-        row.notifyAt != null) {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder:
-            (dialogContext) => AlertDialog(
-              title: const Text('Delete selected row?'),
-              content: const Text(
-                'The row values and notification will be removed after you save.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(dialogContext, false),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(dialogContext, true),
-                  child: const Text('Delete row'),
-                ),
-              ],
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder:
+          (dialogContext) => AlertDialog(
+            title: const Text('Delete selected row?'),
+            content: const Text(
+              'The row values and notification will be removed when you confirm.',
             ),
-      );
-      if (confirmed != true || !mounted) return;
-    }
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Delete row'),
+              ),
+            ],
+          ),
+    );
+    if (confirmed != true || !mounted) return;
     setState(() {
       current.rows.removeWhere((item) => item.id == row.id);
       selectedRowId = null;
       _selection = _TableSelection.none;
       dirty = true;
     });
+    await _save();
   }
 
   void _finishInlineEdit() {
@@ -599,32 +862,54 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     });
   }
 
-  void _updateInlineCell(
+  Future<void> _commitInlineEdit(
     NamedTableRow row,
     NamedTableColumn column,
-    String value,
-  ) {
-    final previous = row.cells[column.id] ?? '';
-    if (previous == value) return;
-    row.cells[column.id] = value;
-    final lineCountChanged =
-        '\n'.allMatches(previous).length != '\n'.allMatches(value).length;
-    if (!dirty || lineCountChanged) setState(() => dirty = true);
-  }
-
-  void _goToNextRow() {
+  ) async {
     final current = table;
-    final row = selectedRow;
-    final column = selectedColumn;
-    if (current == null || row == null || column == null) return;
-    final visible = _visibleRows(current);
-    final index = visible.indexWhere((item) => item.id == row.id);
-    if (index < 0 || index + 1 >= visible.length) {
-      widget.message('This is the last visible row. Use Add Row to continue.');
+    if (current == null || saving) return;
+    final value = cellEditor.text;
+    if (value.length > 10000) {
+      widget.message('Cell value must be at most 10,000 characters');
       return;
     }
+    final before = row.cells[column.id];
+    if (before == value) {
+      _finishInlineEdit();
+      return;
+    }
+    final wasDirty = dirty;
     _finishInlineEdit();
-    _startInlineEdit(visible[index + 1], column);
+    setState(() {
+      row.cells[column.id] = value;
+      dirty = true;
+      saving = true;
+    });
+    try {
+      final saved = await repository.save(current);
+      if (!mounted || widget.selectedTableId != saved.id) return;
+      setState(() {
+        table = saved;
+        persistedTable = saved.copy();
+        dirty = false;
+        serverSearchIds = null;
+      });
+      if (search.text.trim().isNotEmpty) _onSearchChanged();
+      widget.onTablesChanged();
+    } catch (exception) {
+      if (!mounted) return;
+      setState(() {
+        if (before == null) {
+          row.cells.remove(column.id);
+        } else {
+          row.cells[column.id] = before;
+        }
+        dirty = wasDirty;
+      });
+      widget.message('Cell was not saved: $exception');
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
   }
 
   KeyEventResult _handleCellKey(
@@ -632,45 +917,17 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     NamedTableRow row,
     NamedTableColumn column,
   ) {
-    if (event is! KeyDownEvent ||
-        event.logicalKey != LogicalKeyboardKey.enter) {
-      return KeyEventResult.ignored;
+    if (event is KeyDownEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        _finishInlineEdit();
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.enter) {
+        _commitInlineEdit(row, column);
+        return KeyEventResult.handled;
+      }
     }
-    final current = cellEditor.value;
-    final start =
-        current.selection.isValid
-            ? current.selection.start
-            : current.text.length;
-    final end =
-        current.selection.isValid ? current.selection.end : current.text.length;
-    if (current.text.length - (end - start) >= 10000) {
-      return KeyEventResult.handled;
-    }
-    final value = current.text.replaceRange(start, end, '\n');
-    cellEditor.value = TextEditingValue(
-      text: value,
-      selection: TextSelection.collapsed(offset: start + 1),
-    );
-    _updateInlineCell(row, column, value);
-    return KeyEventResult.handled;
-  }
-
-  Future<void> _editCell(NamedTableRow row, NamedTableColumn column) async {
-    _finishInlineEdit();
-    final value = await _ask(
-      column.label.isEmpty ? 'Edit cell' : column.label,
-      row.cells[column.id] ?? '',
-      multiline: true,
-    );
-    if (value == null || !mounted) return;
-    if (value.length > 10000) {
-      widget.message('Cell value must be at most 10,000 characters');
-      return;
-    }
-    setState(() {
-      row.cells[column.id] = value;
-      dirty = true;
-    });
+    return KeyEventResult.ignored;
   }
 
   Future<void> _copy() async {
@@ -705,6 +962,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
         selection: TextSelection.collapsed(offset: value.length),
       );
     }
+    await _save();
   }
 
   Future<void> _importCsv() async {
@@ -832,9 +1090,12 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
           // Keep the active editor visible until the user finishes typing.
           if (row.id == editingRowId) return true;
           if (needle.isNotEmpty &&
-              !row.cells.values.any(
-                (value) => value.toLowerCase().contains(needle),
-              )) {
+              (serverSearchIds != null && !serverSearchIds!.contains(row.id) ||
+                  !current.columns.any(
+                    (column) => (row.cells[column.id] ?? '')
+                        .toLowerCase()
+                        .contains(needle),
+                  ))) {
             return false;
           }
           if (filterNeedle.isNotEmpty &&
@@ -915,182 +1176,9 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     ],
   );
 
-  List<PopupMenuEntry<String>> _selectionMenuItems(
-    NamedTableRow? row,
-  ) => switch (_selection) {
-    _TableSelection.none => const [],
-    _TableSelection.row => [
-      const PopupMenuItem(value: 'duplicate', child: Text('Duplicate Row')),
-      const PopupMenuItem(value: 'row-color', child: Text('Row color')),
-      const PopupMenuItem(value: 'reminder', child: Text('Set notification')),
-      if (row?.notifyAt != null)
-        const PopupMenuItem(
-          value: 'clear-reminder',
-          child: Text('Clear notification'),
-        ),
-      const PopupMenuItem(value: 'delete-row', child: Text('Delete Row')),
-    ],
-    _TableSelection.column => const [
-      PopupMenuItem(value: 'name', child: Text('Name Header')),
-      PopupMenuItem(value: 'column-color', child: Text('Column color')),
-      PopupMenuItem(value: 'sort', child: Text('Sort column')),
-      PopupMenuItem(value: 'delete-column', child: Text('Delete Column')),
-    ],
-    _TableSelection.cell => const [
-      PopupMenuItem(value: 'edit', child: Text('Edit cell')),
-      PopupMenuItem(value: 'copy', child: Text('Copy')),
-      PopupMenuItem(value: 'paste', child: Text('Paste')),
-    ],
-  };
-
-  void _runSelectionAction(String value) {
-    final row = selectedRow;
-    final column = selectedColumn;
-    switch (value) {
-      case 'duplicate':
-        _duplicateRow();
-      case 'row-color':
-        _colorRow();
-      case 'reminder':
-        _setReminder();
-      case 'clear-reminder':
-        _clearReminder();
-      case 'delete-row':
-        _deleteRow();
-      case 'name':
-        if (column != null) _editHeader(column);
-      case 'column-color':
-        _colorColumn();
-      case 'sort':
-        if (column != null) _sortColumn(column);
-      case 'delete-column':
-        _deleteColumn();
-      case 'edit':
-        if (row != null && column != null) _editCell(row, column);
-      case 'copy':
-        _copy();
-      case 'paste':
-        _paste();
-    }
-  }
-
   Widget _toolbar(NamedTable current, List<NamedTableRow> visible) {
     final scheme = Theme.of(context).colorScheme;
     final compact = MediaQuery.sizeOf(context).width < 600;
-    final row = selectedRow;
-    final notificationRow =
-        _selection == _TableSelection.row || _selection == _TableSelection.cell
-            ? row
-            : null;
-    final column = selectedColumn;
-    final rowNumber = row == null ? 0 : current.rows.indexOf(row) + 1;
-    final columnNumber =
-        column == null ? 0 : current.columns.indexOf(column) + 1;
-
-    Widget action(String label, IconData icon, VoidCallback? callback) =>
-        OutlinedButton.icon(
-          onPressed: callback,
-          style:
-              label.startsWith('Delete')
-                  ? OutlinedButton.styleFrom(
-                    foregroundColor: scheme.error,
-                    side: BorderSide(
-                      color: scheme.error.withValues(alpha: .45),
-                    ),
-                  )
-                  : null,
-          icon: Icon(icon, size: 17),
-          label: Text(label),
-        );
-
-    Widget menu(
-      String label,
-      IconData icon,
-      List<PopupMenuEntry<String>> items,
-      ValueChanged<String> onSelected,
-    ) => PopupMenuButton<String>(
-      tooltip: label,
-      onSelected: onSelected,
-      itemBuilder: (_) => items,
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        decoration: BoxDecoration(
-          border: Border.all(color: scheme.outlineVariant),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 18),
-            const SizedBox(width: 8),
-            Text(label),
-            const SizedBox(width: 6),
-            const Icon(Icons.arrow_drop_down, size: 18),
-          ],
-        ),
-      ),
-    );
-
-    String? selectionLabel;
-    String? selectionHelp;
-    final selectedActions = <Widget>[];
-    switch (_selection) {
-      case _TableSelection.none:
-        break;
-      case _TableSelection.row:
-        if (row != null) {
-          selectionLabel = 'Row $rowNumber selected';
-          selectionHelp = 'Manage this row';
-          selectedActions.addAll([
-            action('Duplicate Row', Icons.copy_all_outlined, _duplicateRow),
-            action('Row color', Icons.format_color_fill_outlined, _colorRow),
-            if (row.notifyAt != null)
-              action(
-                'Clear notification',
-                Icons.alarm_off_outlined,
-                _clearReminder,
-              ),
-            action('Delete Row', Icons.delete_outline, _deleteRow),
-          ]);
-        }
-      case _TableSelection.column:
-        if (column != null) {
-          selectionLabel = 'Column $columnNumber selected';
-          selectionHelp =
-              column.label.isEmpty ? 'Unnamed column' : column.label;
-          selectedActions.addAll([
-            action(
-              'Name Header',
-              Icons.edit_note_outlined,
-              () => _editHeader(column),
-            ),
-            action('Column color', Icons.palette_outlined, _colorColumn),
-            action(
-              'Sort column',
-              Icons.sort_by_alpha_outlined,
-              () => _sortColumn(column),
-            ),
-            action('Delete Column', Icons.delete_outline, _deleteColumn),
-          ]);
-        }
-      case _TableSelection.cell:
-        if (row != null && column != null) {
-          selectionLabel = 'Row $rowNumber · Column $columnNumber';
-          selectionHelp = column.label.isEmpty ? 'Selected cell' : column.label;
-          selectedActions.addAll([
-            action('Next row', Icons.arrow_downward, _goToNextRow),
-            action(
-              'Edit cell',
-              Icons.edit_outlined,
-              () => _editCell(row, column),
-            ),
-            action('Copy', Icons.content_copy_outlined, _copy),
-            action('Paste', Icons.content_paste_outlined, _paste),
-          ]);
-        }
-    }
-
     return Material(
       color: scheme.surface,
       child: Padding(
@@ -1099,92 +1187,36 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Wrap(
-              spacing: 12,
-              runSpacing: 10,
+              spacing: 10,
+              runSpacing: 8,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Container(
-                  width: 42,
-                  height: 42,
-                  decoration: BoxDecoration(
-                    color: scheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Icon(
-                    Icons.table_chart_outlined,
-                    color: scheme.onPrimaryContainer,
-                  ),
+                IconButton(
+                  tooltip: 'All tables',
+                  onPressed: () => widget.onSelectTable(null),
+                  icon: const Icon(Icons.arrow_back),
                 ),
-                SizedBox(
-                  width: math.min(
-                    280,
-                    math.max(120, MediaQuery.sizeOf(context).width - 110),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        current.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      Text(
-                        '${current.rows.length} rows · ${current.columns.length} columns',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
+                Text(
+                  current.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleLarge,
                 ),
-                action(
-                  compact ? 'Tables' : 'All tables',
-                  Icons.arrow_back,
-                  () => widget.onSelectTable(null),
-                ),
-                menu(
-                  compact ? 'Options' : 'Table options',
-                  Icons.more_horiz,
-                  const [
-                    PopupMenuItem(value: 'rename', child: Text('Rename table')),
-                    PopupMenuItem(value: 'delete', child: Text('Delete table')),
-                  ],
-                  (value) {
-                    if (value == 'rename') _renameTable();
-                    if (value == 'delete') _deleteTable();
-                  },
+                IconButton(
+                  tooltip: 'Table tools',
+                  onPressed: _showTableTools,
+                  icon: const Icon(Icons.settings_outlined),
                 ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 10),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                FilledButton.tonalIcon(
-                  onPressed: _addRow,
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('Add Row'),
-                ),
-                action('Add Column', Icons.view_column_outlined, _addColumn),
-                Tooltip(
-                  message:
-                      'Choose a row or cell first. Due notifications '
-                      'appear on the dashboard after saving.',
-                  child: action(
-                    notificationRow?.notifyAt == null
-                        ? 'Set notification'
-                        : 'Edit notification',
-                    Icons.notifications_active_outlined,
-                    notificationRow == null
-                        ? () => widget.message(
-                          'Select a row number or cell first, then set its notification.',
-                        )
-                        : _setReminder,
-                  ),
-                ),
                 SizedBox(
-                  width: compact ? MediaQuery.sizeOf(context).width - 40 : 230,
+                  width: compact ? MediaQuery.sizeOf(context).width - 40 : 280,
                   child: TextField(
                     controller: search,
                     decoration: const InputDecoration(
@@ -1195,160 +1227,46 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                     ),
                   ),
                 ),
-                action(
-                  showFilter ? 'Hide filter' : 'Filter',
-                  Icons.filter_alt_outlined,
-                  () => setState(() => showFilter = !showFilter),
-                ),
-                menu(
-                  compact ? 'Files' : 'Import / Export',
-                  Icons.file_present_outlined,
-                  const [
-                    PopupMenuItem(value: 'import', child: Text('Import CSV')),
-                    PopupMenuItem(value: 'export', child: Text('Export CSV')),
-                  ],
-                  (value) {
-                    if (value == 'import') _importCsv();
-                    if (value == 'export') _exportCsv();
+                PopupMenuButton<String>(
+                  tooltip: 'Table layout',
+                  icon: const Icon(Icons.menu),
+                  onSelected: (value) {
+                    if (value == 'rearrange') {
+                      _finishInlineEdit();
+                      setState(() => rearranging = !rearranging);
+                    } else if (value == 'reset') {
+                      _resetLayout();
+                    }
                   },
+                  itemBuilder:
+                      (_) => [
+                        PopupMenuItem(
+                          value: 'rearrange',
+                          child: Text(
+                            rearranging ? 'Exit Rearrange' : 'Rearrange',
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: 'reset',
+                          child: Text('Reset Table Layout'),
+                        ),
+                      ],
                 ),
-                FilledButton.icon(
-                  onPressed: saving ? null : _save,
-                  icon: const Icon(Icons.save_outlined, size: 18),
-                  label: Text(saving ? 'Saving…' : 'Save'),
+                if (rearranging)
+                  TextButton(
+                    onPressed: () => setState(() => rearranging = false),
+                    child: const Text('Done'),
+                  ),
+                FilledButton.tonalIcon(
+                  onPressed: _addRow,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('Add Record'),
                 ),
                 Text(
-                  dirty ? '● Unsaved changes' : 'All changes saved',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: dirty ? scheme.primary : scheme.onSurfaceVariant,
-                    fontWeight: dirty ? FontWeight.w600 : null,
-                  ),
+                  '${visible.length} records',
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
-            ),
-            if (showFilter) ...[
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const Text('Show rows where'),
-                  SizedBox(
-                    width: 180,
-                    child: DropdownButtonFormField<String>(
-                      value: filterColumnId,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        labelText: 'Column',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: [
-                        for (
-                          var index = 0;
-                          index < current.columns.length;
-                          index++
-                        )
-                          DropdownMenuItem(
-                            value: current.columns[index].id,
-                            child: Text(
-                              current.columns[index].label.isEmpty
-                                  ? 'Unnamed ${index + 1}'
-                                  : current.columns[index].label,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                      ],
-                      onChanged:
-                          (value) => setState(() => filterColumnId = value),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 190,
-                    child: TextField(
-                      controller: filter,
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        hintText: 'Contains text',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ),
-                  Text('${visible.length} of ${current.rows.length} rows'),
-                ],
-              ),
-            ],
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color:
-                    selectionLabel == null
-                        ? scheme.surfaceContainerLowest
-                        : scheme.primaryContainer.withValues(alpha: .3),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: scheme.outlineVariant),
-              ),
-              child:
-                  selectionLabel == null
-                      ? Text(
-                        'Tap a cell to type. Use the three-dot menu beside a '
-                        'row number for color and notifications.',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      )
-                      : Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          Icon(
-                            _selection == _TableSelection.row
-                                ? Icons.table_rows_outlined
-                                : _selection == _TableSelection.column
-                                ? Icons.view_column_outlined
-                                : Icons.crop_square_outlined,
-                            size: 19,
-                            color: scheme.primary,
-                          ),
-                          Text(
-                            selectionLabel,
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          if (selectionHelp != null)
-                            Text(
-                              selectionHelp,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          if (compact) ...[
-                            if (_selection == _TableSelection.cell)
-                              action(
-                                'Next row',
-                                Icons.arrow_downward,
-                                _goToNextRow,
-                              ),
-                            menu(
-                              _selection == _TableSelection.row
-                                  ? 'Row actions'
-                                  : _selection == _TableSelection.column
-                                  ? 'Column actions'
-                                  : 'Cell actions',
-                              Icons.more_horiz,
-                              _selectionMenuItems(row),
-                              _runSelectionAction,
-                            ),
-                          ] else
-                            ...selectedActions,
-                          if (_selection == _TableSelection.row &&
-                              row?.notifyAt != null)
-                            Text(
-                              'Notification: ${_formatReminder(row!.notifyAt)} '
-                              '· appears on Dashboard when due',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                        ],
-                      ),
             ),
           ],
         ),
@@ -1356,18 +1274,14 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     );
   }
 
-  static const _rowHeaderWidth = 88.0;
+  static const _rowHeaderWidth = 136.0;
 
-  double _columnWidth(NamedTable current, double available) =>
-      math.max(190, (available - _rowHeaderWidth) / current.columns.length);
+  double _columnWidth(NamedTable current, double available) => math.max(
+    190,
+    (available - _rowHeaderWidth - 48) / current.columns.length,
+  );
 
-  double _dataRowHeight(NamedTableRow row) {
-    var lines = 1;
-    for (final value in row.cells.values) {
-      lines = math.max(lines, '\n'.allMatches(value).length + 1);
-    }
-    return math.max(52, 24 + 24.0 * math.min(lines, 8));
-  }
+  double _dataRowHeight(NamedTableRow row) => 52;
 
   Color _cellFill(NamedTableRow row, NamedTableColumn column, Color fallback) {
     final rowColor = _decodeColor(row.color);
@@ -1390,7 +1304,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   Widget _grid(NamedTable current, List<NamedTableRow> visible) {
     const rowHeight = 52.0;
     final scheme = Theme.of(context).colorScheme;
-    final width = _rowHeaderWidth + current.columns.length * 190.0;
+    final width = _rowHeaderWidth + current.columns.length * 190.0 + 48;
     return LayoutBuilder(
       builder:
           (context, constraints) => Scrollbar(
@@ -1476,62 +1390,114 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                             ),
                                           ),
                                         ),
-                                        PopupMenuButton<String>(
-                                          tooltip: 'Column actions',
-                                          icon: const Icon(
-                                            Icons.more_vert,
-                                            size: 17,
+                                        if (rearranging) ...[
+                                          IconButton(
+                                            tooltip: 'Move column left',
+                                            constraints: const BoxConstraints(
+                                              minWidth: 26,
+                                              minHeight: 28,
+                                            ),
+                                            padding: EdgeInsets.zero,
+                                            icon: const Icon(
+                                              Icons.arrow_back,
+                                              size: 16,
+                                            ),
+                                            onPressed:
+                                                index == 0 || saving
+                                                    ? null
+                                                    : () =>
+                                                        _moveColumn(index, -1),
                                           ),
-                                          padding: EdgeInsets.zero,
-                                          onSelected: (action) {
-                                            _finishInlineEdit();
-                                            setState(() {
-                                              selectedColumnId =
-                                                  current.columns[index].id;
-                                              _selection =
-                                                  _TableSelection.column;
-                                            });
-                                            switch (action) {
-                                              case 'name':
-                                                _editHeader(
-                                                  current.columns[index],
-                                                );
-                                              case 'sort':
-                                                _sortColumn(
-                                                  current.columns[index],
-                                                );
-                                              case 'color':
-                                                _colorColumn();
-                                              case 'delete':
-                                                _deleteColumn();
-                                            }
-                                          },
-                                          itemBuilder:
-                                              (_) => const [
-                                                PopupMenuItem(
-                                                  value: 'name',
-                                                  child: Text('Name header'),
-                                                ),
-                                                PopupMenuItem(
-                                                  value: 'sort',
-                                                  child: Text('Sort column'),
-                                                ),
-                                                PopupMenuItem(
-                                                  value: 'color',
-                                                  child: Text('Color column'),
-                                                ),
-                                                PopupMenuItem(
-                                                  value: 'delete',
-                                                  child: Text('Delete column'),
-                                                ),
-                                              ],
-                                        ),
+                                          IconButton(
+                                            tooltip: 'Move column right',
+                                            constraints: const BoxConstraints(
+                                              minWidth: 26,
+                                              minHeight: 28,
+                                            ),
+                                            padding: EdgeInsets.zero,
+                                            icon: const Icon(
+                                              Icons.arrow_forward,
+                                              size: 16,
+                                            ),
+                                            onPressed:
+                                                index ==
+                                                            current
+                                                                    .columns
+                                                                    .length -
+                                                                1 ||
+                                                        saving
+                                                    ? null
+                                                    : () =>
+                                                        _moveColumn(index, 1),
+                                          ),
+                                        ],
+                                        if (!rearranging)
+                                          PopupMenuButton<String>(
+                                            tooltip: 'Column actions',
+                                            icon: const Icon(
+                                              Icons.more_vert,
+                                              size: 17,
+                                            ),
+                                            padding: EdgeInsets.zero,
+                                            onSelected: (action) {
+                                              _finishInlineEdit();
+                                              setState(() {
+                                                selectedColumnId =
+                                                    current.columns[index].id;
+                                                _selection =
+                                                    _TableSelection.column;
+                                              });
+                                              switch (action) {
+                                                case 'name':
+                                                  _editHeader(
+                                                    current.columns[index],
+                                                  );
+                                                case 'sort':
+                                                  _sortColumn(
+                                                    current.columns[index],
+                                                  );
+                                                case 'color':
+                                                  _colorColumn();
+                                                case 'delete':
+                                                  _deleteColumn();
+                                              }
+                                            },
+                                            itemBuilder:
+                                                (_) => const [
+                                                  PopupMenuItem(
+                                                    value: 'name',
+                                                    child: Text('Name header'),
+                                                  ),
+                                                  PopupMenuItem(
+                                                    value: 'sort',
+                                                    child: Text('Sort column'),
+                                                  ),
+                                                  PopupMenuItem(
+                                                    value: 'color',
+                                                    child: Text('Color column'),
+                                                  ),
+                                                  PopupMenuItem(
+                                                    value: 'delete',
+                                                    child: Text(
+                                                      'Delete column',
+                                                    ),
+                                                  ),
+                                                ],
+                                          ),
                                       ],
                                     ),
                                   ),
                                 ),
                               ),
                             ),
+                          SizedBox(
+                            width: 48,
+                            child: IconButton(
+                              tooltip: 'Add form field',
+                              onPressed: rearranging ? null : _addColumn,
+                              icon: const Icon(Icons.add, size: 18),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1602,76 +1568,123 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                                 ),
                                               ),
                                             ),
-                                            PopupMenuButton<String>(
-                                              tooltip:
-                                                  'Row ${index + 1} actions',
-                                              icon: Icon(
-                                                Icons.more_vert,
-                                                color:
-                                                    row.notifyAt == null
-                                                        ? scheme
-                                                            .onSurfaceVariant
-                                                        : scheme.primary,
+                                            if (rearranging) ...[
+                                              IconButton(
+                                                tooltip: 'Move row up',
+                                                constraints:
+                                                    const BoxConstraints(
+                                                      minWidth: 26,
+                                                      minHeight: 28,
+                                                    ),
+                                                padding: EdgeInsets.zero,
+                                                icon: const Icon(
+                                                  Icons.arrow_upward,
+                                                  size: 16,
+                                                ),
+                                                onPressed:
+                                                    index == 0 ||
+                                                            saving ||
+                                                            !canRearrangeRows
+                                                        ? null
+                                                        : () =>
+                                                            _moveRow(index, -1),
                                               ),
-                                              padding: EdgeInsets.zero,
-                                              onSelected: (action) {
-                                                _selectRowForAction(row);
-                                                switch (action) {
-                                                  case 'color':
-                                                    _colorRow();
-                                                  case 'notify':
-                                                    _setReminder();
-                                                  case 'clear-notification':
-                                                    _clearReminder();
-                                                  case 'duplicate':
-                                                    _duplicateRow();
-                                                  case 'delete':
-                                                    _deleteRow();
-                                                }
-                                              },
-                                              itemBuilder:
-                                                  (_) => [
-                                                    PopupMenuItem(
-                                                      key: ValueKey(
-                                                        'row-action-color-${row.id}',
-                                                      ),
-                                                      value: 'color',
-                                                      child: const Text(
-                                                        'Color row',
-                                                      ),
+                                              IconButton(
+                                                tooltip: 'Move row down',
+                                                constraints:
+                                                    const BoxConstraints(
+                                                      minWidth: 26,
+                                                      minHeight: 28,
                                                     ),
-                                                    PopupMenuItem(
-                                                      key: ValueKey(
-                                                        'row-action-notification-${row.id}',
-                                                      ),
-                                                      value: 'notify',
-                                                      child: Text(
-                                                        row.notifyAt == null
-                                                            ? 'Set notification'
-                                                            : 'Edit notification',
-                                                      ),
-                                                    ),
-                                                    if (row.notifyAt != null)
-                                                      const PopupMenuItem(
-                                                        value:
-                                                            'clear-notification',
-                                                        child: Text(
-                                                          'Clear notification',
+                                                padding: EdgeInsets.zero,
+                                                icon: const Icon(
+                                                  Icons.arrow_downward,
+                                                  size: 16,
+                                                ),
+                                                onPressed:
+                                                    index ==
+                                                                visible.length -
+                                                                    1 ||
+                                                            saving ||
+                                                            !canRearrangeRows
+                                                        ? null
+                                                        : () =>
+                                                            _moveRow(index, 1),
+                                              ),
+                                            ],
+                                            if (!rearranging)
+                                              PopupMenuButton<String>(
+                                                tooltip:
+                                                    'Row ${index + 1} actions',
+                                                icon: Icon(
+                                                  Icons.more_vert,
+                                                  color:
+                                                      row.notifyAt == null
+                                                          ? scheme
+                                                              .onSurfaceVariant
+                                                          : scheme.primary,
+                                                ),
+                                                padding: EdgeInsets.zero,
+                                                onSelected: (action) {
+                                                  _selectRowForAction(row);
+                                                  switch (action) {
+                                                    case 'color':
+                                                      _colorRow();
+                                                    case 'notify':
+                                                      _setReminder();
+                                                    case 'clear-notification':
+                                                      _clearReminder();
+                                                    case 'duplicate':
+                                                      _duplicateRow();
+                                                    case 'delete':
+                                                      _deleteRow();
+                                                  }
+                                                },
+                                                itemBuilder:
+                                                    (_) => [
+                                                      PopupMenuItem(
+                                                        key: ValueKey(
+                                                          'row-action-color-${row.id}',
+                                                        ),
+                                                        value: 'color',
+                                                        child: const Text(
+                                                          'Color row',
                                                         ),
                                                       ),
-                                                    const PopupMenuDivider(),
-                                                    const PopupMenuItem(
-                                                      value: 'duplicate',
-                                                      child: Text(
-                                                        'Duplicate row',
+                                                      PopupMenuItem(
+                                                        key: ValueKey(
+                                                          'row-action-notification-${row.id}',
+                                                        ),
+                                                        value: 'notify',
+                                                        child: Text(
+                                                          row.notifyAt == null
+                                                              ? 'Set notification'
+                                                              : 'Edit notification',
+                                                        ),
                                                       ),
-                                                    ),
-                                                    const PopupMenuItem(
-                                                      value: 'delete',
-                                                      child: Text('Delete row'),
-                                                    ),
-                                                  ],
-                                            ),
+                                                      if (row.notifyAt != null)
+                                                        const PopupMenuItem(
+                                                          value:
+                                                              'clear-notification',
+                                                          child: Text(
+                                                            'Clear notification',
+                                                          ),
+                                                        ),
+                                                      const PopupMenuDivider(),
+                                                      const PopupMenuItem(
+                                                        value: 'duplicate',
+                                                        child: Text(
+                                                          'Duplicate row',
+                                                        ),
+                                                      ),
+                                                      const PopupMenuItem(
+                                                        value: 'delete',
+                                                        child: Text(
+                                                          'Delete row',
+                                                        ),
+                                                      ),
+                                                    ],
+                                              ),
                                           ],
                                         ),
                                       ),
@@ -1688,8 +1701,15 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                         key: ValueKey(
                                           'table-cell-${row.id}-${column.id}',
                                         ),
-                                        onTap:
-                                            () => _startInlineEdit(row, column),
+                                        onTap: () {
+                                          if (rearranging ||
+                                              (editingRowId == row.id &&
+                                                  editingColumnId ==
+                                                      column.id)) {
+                                            return;
+                                          }
+                                          _startInlineEdit(row, column);
+                                        },
                                         child: Container(
                                           alignment: Alignment.centerLeft,
                                           padding: const EdgeInsets.symmetric(
@@ -1770,77 +1790,144 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                               editingRowId == row.id &&
                                                       editingColumnId ==
                                                           column.id
-                                                  ? Focus(
-                                                    onKeyEvent:
-                                                        (_, event) =>
-                                                            _handleCellKey(
-                                                              event,
-                                                              row,
-                                                              column,
+                                                  ? Row(
+                                                    children: [
+                                                      Expanded(
+                                                        child: Focus(
+                                                          onKeyEvent:
+                                                              (_, event) =>
+                                                                  _handleCellKey(
+                                                                    event,
+                                                                    row,
+                                                                    column,
+                                                                  ),
+                                                          child: TextField(
+                                                            key: const ValueKey(
+                                                              'table-cell-editor',
                                                             ),
-                                                    child: TextField(
-                                                      key: const ValueKey(
-                                                        'table-cell-editor',
+                                                            controller:
+                                                                cellEditor,
+                                                            focusNode:
+                                                                cellFocus,
+                                                            maxLines: 1,
+                                                            keyboardType:
+                                                                TextInputType
+                                                                    .text,
+                                                            textInputAction:
+                                                                TextInputAction
+                                                                    .done,
+                                                            textAlignVertical:
+                                                                TextAlignVertical
+                                                                    .top,
+                                                            style:
+                                                                Theme.of(
+                                                                      context,
+                                                                    )
+                                                                    .textTheme
+                                                                    .bodyMedium,
+                                                            inputFormatters: [
+                                                              LengthLimitingTextInputFormatter(
+                                                                10000,
+                                                              ),
+                                                            ],
+                                                            decoration:
+                                                                const InputDecoration(
+                                                                  isCollapsed:
+                                                                      true,
+                                                                  border:
+                                                                      InputBorder
+                                                                          .none,
+                                                                  enabledBorder:
+                                                                      InputBorder
+                                                                          .none,
+                                                                  focusedBorder:
+                                                                      InputBorder
+                                                                          .none,
+                                                                  contentPadding:
+                                                                      EdgeInsets
+                                                                          .zero,
+                                                                ),
+                                                            onSubmitted:
+                                                                (_) =>
+                                                                    _commitInlineEdit(
+                                                                      row,
+                                                                      column,
+                                                                    ),
+                                                          ),
+                                                        ),
                                                       ),
-                                                      controller: cellEditor,
-                                                      focusNode: cellFocus,
-                                                      minLines: null,
-                                                      maxLines: null,
-                                                      expands: true,
-                                                      keyboardType:
-                                                          TextInputType
-                                                              .multiline,
-                                                      textInputAction:
-                                                          TextInputAction
-                                                              .newline,
-                                                      textAlignVertical:
-                                                          TextAlignVertical.top,
+                                                      IconButton(
+                                                        tooltip: 'Save cell',
+                                                        constraints:
+                                                            const BoxConstraints(
+                                                              minWidth: 25,
+                                                              minHeight: 28,
+                                                            ),
+                                                        padding:
+                                                            EdgeInsets.zero,
+                                                        icon: const Icon(
+                                                          Icons.check,
+                                                          size: 16,
+                                                        ),
+                                                        onPressed:
+                                                            () =>
+                                                                _commitInlineEdit(
+                                                                  row,
+                                                                  column,
+                                                                ),
+                                                      ),
+                                                      IconButton(
+                                                        tooltip: 'Cancel edit',
+                                                        constraints:
+                                                            const BoxConstraints(
+                                                              minWidth: 25,
+                                                              minHeight: 28,
+                                                            ),
+                                                        padding:
+                                                            EdgeInsets.zero,
+                                                        icon: const Icon(
+                                                          Icons.close,
+                                                          size: 16,
+                                                        ),
+                                                        onPressed:
+                                                            _finishInlineEdit,
+                                                      ),
+                                                    ],
+                                                  )
+                                                  : Tooltip(
+                                                    message:
+                                                        row.cells[column.id] ??
+                                                        '',
+                                                    child: Text(
+                                                      row.cells[column.id] ??
+                                                          '',
+                                                      maxLines: 1,
+                                                      softWrap: false,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
                                                       style:
                                                           Theme.of(context)
                                                               .textTheme
                                                               .bodyMedium,
-                                                      inputFormatters: [
-                                                        LengthLimitingTextInputFormatter(
-                                                          10000,
-                                                        ),
-                                                      ],
-                                                      decoration:
-                                                          const InputDecoration(
-                                                            isCollapsed: true,
-                                                            border:
-                                                                InputBorder
-                                                                    .none,
-                                                            enabledBorder:
-                                                                InputBorder
-                                                                    .none,
-                                                            focusedBorder:
-                                                                InputBorder
-                                                                    .none,
-                                                            contentPadding:
-                                                                EdgeInsets.zero,
-                                                          ),
-                                                      onChanged:
-                                                          (value) =>
-                                                              _updateInlineCell(
-                                                                row,
-                                                                column,
-                                                                value,
-                                                              ),
                                                     ),
-                                                  )
-                                                  : Text(
-                                                    row.cells[column.id] ?? '',
-                                                    maxLines: 8,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style:
-                                                        Theme.of(
-                                                          context,
-                                                        ).textTheme.bodyMedium,
                                                   ),
                                         ),
                                       ),
                                     ),
+                                  SizedBox(
+                                    width: 48,
+                                    child: IconButton(
+                                      tooltip: 'Delete row',
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        size: 18,
+                                      ),
+                                      onPressed: () {
+                                        _selectRowForAction(row);
+                                        _deleteRow();
+                                      },
+                                    ),
+                                  ),
                                 ],
                               ),
                             );

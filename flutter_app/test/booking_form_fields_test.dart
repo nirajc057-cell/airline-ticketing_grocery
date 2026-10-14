@@ -383,8 +383,11 @@ void main() {
     expect(find.text('Visa number'), findsOneWidget);
     await tester.tap(find.byTooltip('Delete Visa number'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('permanently erases'), findsOneWidget);
-    await tester.tap(find.text('Delete field and data'));
+    expect(
+      find.textContaining('Existing record values are retained'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Remove field'));
     await tester.pumpAndSettle();
     expect(api.custom, isEmpty);
   });

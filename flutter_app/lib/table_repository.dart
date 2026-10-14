@@ -1,12 +1,26 @@
 import 'api.dart';
+import 'booking_form_fields.dart';
+import 'modules.dart';
 import 'table_model.dart';
 
 class TableSnapshot {
-  const TableSnapshot(this.rows, this.customColumns, this.initialized);
+  const TableSnapshot(
+    this.rows,
+    this.customColumns,
+    this.initialized, {
+    this.formColumns = const [],
+    this.columnOrder = const [],
+    this.rowOrder = const [],
+    this.layoutRevision = 0,
+  });
 
   final List<SpreadsheetRow> rows;
   final List<TableColumnDef> customColumns;
   final bool initialized;
+  final List<TableColumnDef> formColumns;
+  final List<String> columnOrder;
+  final List<String> rowOrder;
+  final int layoutRevision;
 }
 
 class TableSaveResult {
@@ -23,12 +37,20 @@ class TableRepository {
   final ApiClient api;
   final TableKind kind;
 
-  Future<TableSnapshot> load() async {
+  Future<TableSnapshot> load({String search = ''}) async {
     final results = await Future.wait<dynamic>([
-      api.get(kind.path),
+      api.get(search.isEmpty
+          ? kind.path
+          : '${kind.path}?search=${Uri.encodeQueryComponent(search)}'),
       api.get('${kind.path}/table-columns'),
       api.get('${kind.path}/table-setup'),
       api.get('${kind.path}/table-drafts'),
+      api.get(
+        recordFormPath(
+          kind == TableKind.bookings ? 'bookings' : 'grocery_products',
+        ),
+      ),
+      api.get('${kind.path}/table-layout'),
     ]);
     final columns =
         asRows(results[1])
@@ -42,6 +64,31 @@ class TableRepository {
             )
             .where((column) => column.key.isNotEmpty)
             .toList();
+    final module = kind == TableKind.bookings ? 'bookings' : 'grocery_products';
+    final existing = {
+      for (final column in kind.baseColumns) column.key: column,
+    };
+    final formColumns = <TableColumnDef>[
+      kind.baseColumns.first,
+      for (final field in recordFieldsFor(module, results[4]))
+        TableColumnDef(
+          field.key,
+          field.label,
+          type: switch (field.type) {
+            FieldType.number => TableValueType.number,
+            FieldType.date => TableValueType.date,
+            FieldType.choice => TableValueType.choice,
+            FieldType.paragraph => TableValueType.longText,
+            FieldType.toggle => TableValueType.toggle,
+            _ => TableValueType.text,
+          },
+          required: field.required,
+          editable: existing[field.key]?.editable ?? true,
+          width: existing[field.key]?.width ?? 180,
+          choices: field.choices,
+        ),
+    ];
+    final layout = asMap(results[5]);
     return TableSnapshot(
       [
         ...asRows(results[3]).map(
@@ -55,8 +102,26 @@ class TableRepository {
       ],
       columns,
       asMap(results[2])['initialized'] == true,
+      formColumns: formColumns,
+      columnOrder:
+          (layout['columns'] as List? ?? []).map((e) => e.toString()).toList(),
+      rowOrder:
+          (layout['rows'] as List? ?? []).map((e) => e.toString()).toList(),
+      layoutRevision: (layout['revision'] as num?)?.toInt() ?? 0,
     );
   }
+
+  Future<Map<String, dynamic>> saveLayout({
+    required int revision,
+    List<String>? columns,
+    List<String>? rows,
+  }) async => asMap(
+    await api.patch('${kind.path}/table-layout', {
+      'revision': revision,
+      if (columns != null) 'columns': columns,
+      if (rows != null) 'rows': rows,
+    }),
+  );
 
   Future<void> createSetup({
     required int rows,

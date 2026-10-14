@@ -316,14 +316,10 @@ class _BookingFieldsManagerState extends State<_BookingFieldsManager> {
       context: context,
       builder:
           (context) => AlertDialog(
-            title: Text('Delete ${field.label}?'),
-            content: Text(
-              widget.module == 'bookings'
-                  ? 'This permanently erases this field and its values from every saved '
-                      'booking and unfinished booking table row. This cannot be undone. '
-                      'Deleting core fields may affect booking reports and payments.'
-                  : 'This permanently erases this field and its values from every '
-                      'saved ${formName.toLowerCase()} record. This cannot be undone.',
+            title: Text('Remove ${field.label} from form?'),
+            content: const Text(
+              'This hides the field from the active form and table. Existing '
+              'record values are retained, and the field can be restored later.',
             ),
             actions: [
               TextButton(
@@ -332,7 +328,7 @@ class _BookingFieldsManagerState extends State<_BookingFieldsManager> {
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(context, true),
-                child: const Text('Delete field and data'),
+                child: const Text('Remove field'),
               ),
             ],
           ),
@@ -400,6 +396,7 @@ class _BookingFieldsManagerState extends State<_BookingFieldsManager> {
                               : [])
                           .map((item) => item.toString())
                           .toSet();
+                  final archived = asRows(config['archivedCustom']);
                   return ListView(
                     key: PageStorageKey('form-field-list-${widget.module}'),
                     children: [
@@ -477,7 +474,7 @@ class _BookingFieldsManagerState extends State<_BookingFieldsManager> {
                             ],
                           ),
                         ),
-                      if (removed.isNotEmpty) ...[
+                      if (removed.isNotEmpty || archived.isNotEmpty) ...[
                         const Divider(),
                         for (final field in baseRecordFields(widget.module))
                           if (removed.contains(field.key))
@@ -493,6 +490,19 @@ class _BookingFieldsManagerState extends State<_BookingFieldsManager> {
                                 child: const Text('Restore'),
                               ),
                             ),
+                        for (final field in archived)
+                          ListTile(
+                            title: Text(field['label']?.toString() ?? 'Field'),
+                            trailing: TextButton(
+                              onPressed:
+                                  busy
+                                      ? null
+                                      : () => _write('POST', {
+                                        'restoreKey': field['key'],
+                                      }),
+                              child: const Text('Restore'),
+                            ),
+                          ),
                       ],
                     ],
                   );
