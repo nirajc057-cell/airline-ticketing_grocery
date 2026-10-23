@@ -371,7 +371,6 @@ class _WorkspaceState extends State<Workspace> {
       'company_assets' => 'Track items issued to employees',
       'payment_methods' =>
         'Bank and wallet details used throughout the workspace',
-      'finance' => 'Track money in, money out, and what is owed',
       _ => 'Manage your travel experience',
     };
     final name = user?['name']?.toString() ?? 'Traveler';
@@ -389,7 +388,7 @@ class _WorkspaceState extends State<Workspace> {
               builder:
                   (context) => IconButton(
                     tooltip: 'Open menu',
-                    icon: const Icon(Icons.menu_rounded),
+                    icon: const Icon(Icons.apps_rounded),
                     onPressed: () => Scaffold.of(context).openDrawer(),
                   ),
             ),
@@ -466,7 +465,8 @@ class _WorkspaceState extends State<Workspace> {
             Builder(
               builder:
                   (context) => IconButton(
-                    icon: const Icon(Icons.menu),
+                    tooltip: 'Open menu',
+                    icon: const Icon(Icons.apps_rounded),
                     onPressed: () => Scaffold.of(context).openDrawer(),
                   ),
             ),
@@ -577,7 +577,7 @@ class _WorkspaceState extends State<Workspace> {
           ),
         ),
         const NavigationDestination(
-          icon: Icon(Icons.menu_rounded),
+          icon: Icon(Icons.apps_rounded),
           label: 'More',
         ),
       ],

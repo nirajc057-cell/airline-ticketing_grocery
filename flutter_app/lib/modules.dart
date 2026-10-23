@@ -529,6 +529,7 @@ const airlineModules = <ModuleSpec>[
     ],
     fields: bookingFields,
     createLabel: 'New booking',
+    editPath: '/api/bookings',
   ),
   ModuleSpec('table', 'Table', '/api/bookings', Icons.table_chart_outlined, []),
   ModuleSpec(
@@ -564,6 +565,7 @@ const airlineModules = <ModuleSpec>[
     ['name', 'email', 'phone', 'nationality', 'passport', 'trips'],
     fields: airlineCustomerFields,
     createLabel: 'Add customer',
+    editPath: '/api/customers',
   ),
   ModuleSpec(
     'quotes',
@@ -573,13 +575,7 @@ const airlineModules = <ModuleSpec>[
     ['id', 'customerName', 'route', 'travelDate', 'total', 'status'],
     fields: quoteFields,
     createLabel: 'New quotation',
-  ),
-  ModuleSpec(
-    'finance',
-    'Wallet & ledger',
-    '/api/finance/overview',
-    Icons.account_balance_wallet_outlined,
-    [],
+    editPath: '/api/quotes',
   ),
   ModuleSpec(
     'passports',
@@ -596,6 +592,7 @@ const airlineModules = <ModuleSpec>[
     ],
     fields: passportFields,
     createLabel: 'New passport service',
+    editPath: '/api/passports',
   ),
   ModuleSpec(
     'refunds',
@@ -633,6 +630,7 @@ const airlineModules = <ModuleSpec>[
         initial: 'Open',
       ),
     ],
+    editPath: '/api/cases',
   ),
   ModuleSpec(
     'reports',
@@ -786,6 +784,7 @@ const groceryModules = <ModuleSpec>[
     ['name', 'phone', 'email', 'tier', 'points', 'spent', 'status'],
     fields: groceryCustomerFields,
     createLabel: 'Add customer',
+    editPath: '/api/grocery/customers',
   ),
   ModuleSpec(
     'expenses',

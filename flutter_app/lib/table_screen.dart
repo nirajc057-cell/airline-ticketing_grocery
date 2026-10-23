@@ -12,8 +12,11 @@ import 'package:share_plus/share_plus.dart';
 import 'api.dart';
 import 'booking_form_fields.dart';
 import 'form_sheet.dart';
+import 'inline_cell_layout.dart';
+import 'record_print.dart';
 import 'table_model.dart';
 import 'table_repository.dart';
+import 'table_view_ui.dart';
 
 class TableScreen extends StatefulWidget {
   const TableScreen({
@@ -46,9 +49,6 @@ class TableScreenState extends State<TableScreen> {
   List<TableColumnDef> customColumns = [];
   List<TableColumnDef> formColumns = [];
   List<String> columnOrder = [];
-  int layoutRevision = 0;
-  bool rearranging = false;
-  bool layoutSaving = false;
   bool adding = false;
   SpreadsheetRow? editingRow;
   String? editingKey;
@@ -63,6 +63,8 @@ class TableScreenState extends State<TableScreen> {
   bool saving = false;
   bool showFilter = false;
   bool initialized = false;
+  int _page = 0;
+  int _pageSize = 10;
   int _loadVersion = 0;
   String? error;
 
@@ -92,7 +94,7 @@ class TableScreenState extends State<TableScreen> {
     kind = widget.grocery ? TableKind.products : TableKind.bookings;
     repository = TableRepository(widget.api, kind);
     searchController.addListener(_onSearchChanged);
-    filterController.addListener(_rebuildVisible);
+    filterController.addListener(_onFilterChanged);
     _load();
   }
 
@@ -105,6 +107,7 @@ class TableScreenState extends State<TableScreen> {
       selectedRow = null;
       selectedKey = null;
       filterKey = null;
+      _page = 0;
       searchController.clear();
       filterController.clear();
       _searchDebounce?.cancel();
@@ -116,7 +119,7 @@ class TableScreenState extends State<TableScreen> {
   void dispose() {
     searchController.removeListener(_onSearchChanged);
     _searchDebounce?.cancel();
-    filterController.removeListener(_rebuildVisible);
+    filterController.removeListener(_onFilterChanged);
     searchController.dispose();
     filterController.dispose();
     cellEditor.dispose();
@@ -127,11 +130,17 @@ class TableScreenState extends State<TableScreen> {
   }
 
   void _onSearchChanged() {
+    _page = 0;
     _rebuildVisible();
     _searchDebounce?.cancel();
     _searchDebounce = Timer(const Duration(milliseconds: 300), () {
       if (mounted) _load();
     });
+  }
+
+  void _onFilterChanged() {
+    _page = 0;
+    _rebuildVisible();
   }
 
   Future<void> _load() async {
@@ -167,7 +176,6 @@ class TableScreenState extends State<TableScreen> {
         customColumns = snapshot.customColumns;
         formColumns = snapshot.formColumns;
         columnOrder = snapshot.columnOrder;
-        layoutRevision = snapshot.layoutRevision;
         final positions = {
           for (var index = 0; index < snapshot.rowOrder.length; index++)
             snapshot.rowOrder[index]: index,
@@ -222,6 +230,7 @@ class TableScreenState extends State<TableScreen> {
           }
           if (filter.isNotEmpty &&
               filterKey != null &&
+              keys.contains(filterKey) &&
               !(row.values[filterKey] ?? '').toString().toLowerCase().contains(
                 filter,
               )) {
@@ -249,15 +258,15 @@ class TableScreenState extends State<TableScreen> {
   }
 
   void _sort(TableColumnDef column) {
-    if (rearranging) return;
     ascending = sortKey == column.key ? !ascending : true;
     sortKey = column.key;
+    _page = 0;
     _rebuildVisible();
   }
 
   void _select(SpreadsheetRow row, TableColumnDef column) {
     if (editingRow == row && editingKey == column.key) return;
-    if (column.editable && !rearranging) {
+    if (column.editable) {
       _startInlineEdit(row, column);
       return;
     }
@@ -293,7 +302,8 @@ class TableScreenState extends State<TableScreen> {
     TableColumnDef column,
   ) async {
     if (saving) return;
-    final value = cellEditor.text.trim();
+    final content = cellEditor.text;
+    final value = content.trim();
     if (column.required && value.isEmpty) {
       widget.message('${column.label} is required');
       return;
@@ -319,8 +329,11 @@ class TableScreenState extends State<TableScreen> {
     final before = Map<String, dynamic>.of(row.values);
     final beforeDirty = row.dirty;
     final beforeKeys = Set<String>.of(row.changedKeys);
-    final parsed =
-        column.type == TableValueType.toggle ? value == 'true' : value;
+    final parsed = switch (column.type) {
+      TableValueType.toggle => value == 'true',
+      TableValueType.text || TableValueType.longText => content,
+      _ => value,
+    };
     setState(() {
       row.setValue(column.key, parsed);
       editingRow = null;
@@ -452,119 +465,6 @@ class TableScreenState extends State<TableScreen> {
       widget.message('Row deleted');
     } catch (exception) {
       widget.message(exception.toString());
-    }
-  }
-
-  bool get canRearrangeRows =>
-      searchController.text.trim().isEmpty &&
-      filterController.text.trim().isEmpty &&
-      sortKey == null;
-
-  Future<void> _moveColumn(int index, int direction) async {
-    if (layoutSaving ||
-        index + direction < 0 ||
-        index + direction >= columns.length) {
-      return;
-    }
-    final next = columns.map((column) => column.key).toList();
-    final value = next.removeAt(index);
-    next.insert(index + direction, value);
-    setState(() {
-      columnOrder = next;
-      layoutSaving = true;
-    });
-    try {
-      final saved = await repository.saveLayout(
-        revision: layoutRevision,
-        columns: next,
-      );
-      if (mounted) {
-        setState(
-          () =>
-              layoutRevision =
-                  (saved['revision'] as num?)?.toInt() ?? layoutRevision + 1,
-        );
-      }
-    } catch (exception) {
-      if (mounted) {
-        widget.message('Column order was not saved: $exception');
-        await _load();
-      }
-    } finally {
-      if (mounted) setState(() => layoutSaving = false);
-    }
-  }
-
-  Future<void> _moveRow(int index, int direction) async {
-    if (layoutSaving ||
-        !canRearrangeRows ||
-        index + direction < 0 ||
-        index + direction >= visibleRows.length) {
-      return;
-    }
-    final row = visibleRows[index];
-    final other = visibleRows[index + direction];
-    final first = rows.indexOf(row);
-    final second = rows.indexOf(other);
-    if (first < 0 || second < 0) return;
-    final moved = [...rows];
-    moved[first] = other;
-    moved[second] = row;
-    final ids = moved.map((item) => item.draftId ?? item.id).toList();
-    if (ids.any((id) => id.isEmpty)) {
-      widget.message('Save new rows before rearranging them');
-      return;
-    }
-    setState(() {
-      rows = moved;
-      layoutSaving = true;
-    });
-    _rebuildVisible();
-    try {
-      final saved = await repository.saveLayout(
-        revision: layoutRevision,
-        rows: ids,
-      );
-      if (mounted) {
-        setState(
-          () =>
-              layoutRevision =
-                  (saved['revision'] as num?)?.toInt() ?? layoutRevision + 1,
-        );
-      }
-    } catch (exception) {
-      if (mounted) {
-        widget.message('Row order was not saved: $exception');
-        await _load();
-      }
-    } finally {
-      if (mounted) setState(() => layoutSaving = false);
-    }
-  }
-
-  Future<void> _resetLayout() async {
-    if (layoutSaving) return;
-    setState(() => layoutSaving = true);
-    try {
-      await repository.saveLayout(
-        revision: layoutRevision,
-        columns: [],
-        rows: [],
-      );
-      if (!mounted) return;
-      setState(() {
-        rearranging = false;
-        sortKey = null;
-        filterKey = null;
-        showFilter = false;
-        filterController.clear();
-      });
-      await _load();
-      widget.message('Table layout reset. Records were not changed.');
-    } catch (exception) {
-      if (mounted) widget.message('Could not reset layout: $exception');
-    } finally {
-      if (mounted) setState(() => layoutSaving = false);
     }
   }
 
@@ -813,6 +713,35 @@ class TableScreenState extends State<TableScreen> {
     }
   }
 
+  Future<void> _printRow(SpreadsheetRow row) async {
+    final values = Map<String, dynamic>.of(row.values);
+    if (identical(editingRow, row) && editingKey != null) {
+      values[editingKey!] = cellEditor.text;
+    }
+    try {
+      await printRecord(
+        RecordPrintData(
+          brand: widget.grocery ? 'FreshMart' : 'AeroDesk',
+          title:
+              '${kind == TableKind.bookings ? 'Booking' : 'Product'} row'
+              '${row.isNew || row.dirty ? ' (draft)' : ''}',
+          reference: row.id.isEmpty ? 'Draft row' : row.id,
+          fields: [
+            for (final column in columns)
+              if (!isSensitivePrintField(column.key) &&
+                  !isSensitivePrintField(column.label))
+                RecordPrintField(
+                  column.label,
+                  displayValue(values[column.key]),
+                ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) widget.message('Could not print row: $error');
+    }
+  }
+
   Future<void> _showSpreadsheetTools() async {
     final choice = await showModalBottomSheet<String>(
       context: context,
@@ -843,6 +772,7 @@ class TableScreenState extends State<TableScreen> {
                   ),
                   ('import', 'Import CSV', Icons.file_upload_outlined),
                   ('export', 'Export CSV', Icons.file_download_outlined),
+                  ('print', 'Print selected row', Icons.print_outlined),
                 ])
                   ListTile(
                     leading: Icon(tool.$3),
@@ -869,96 +799,118 @@ class TableScreenState extends State<TableScreen> {
         _importCsv();
       case 'export':
         _exportCsv();
+      case 'print':
+        final row = selectedRow;
+        if (row == null) {
+          widget.message('Select a row to print');
+        } else {
+          _printRow(row);
+        }
     }
   }
 
   Widget _toolbar() {
     final theme = Theme.of(context);
+    final activeFilter =
+        columns.any((column) => column.key == filterKey) ? filterKey : null;
     return Container(
       color: theme.colorScheme.surface,
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 10,
+            runSpacing: 8,
             children: [
-              Expanded(
-                child: Text(
-                  kind == TableKind.bookings
-                      ? 'Linked booking table'
-                      : 'Linked product table',
-                  style: theme.textTheme.titleMedium,
-                ),
-              ),
-              IconButton(
-                tooltip: 'Spreadsheet tools',
-                onPressed: _showSpreadsheetTools,
-                icon: const Icon(Icons.settings_outlined),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'DATA TABLE',
+                    style: TextStyle(
+                      color: theme.colorScheme.primary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    kind == TableKind.bookings
+                        ? 'Linked booking table'
+                        : 'Linked product table',
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Text(
+                    '${visibleRows.length} records in this view${hasPendingChanges ? ' • Unsaved changes' : ''}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              SizedBox(
-                width: 250,
-                child: TextField(
-                  controller: searchController,
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    prefixIcon: Icon(Icons.search),
-                    hintText: 'Search table data',
+          const SizedBox(height: 14),
+          TableRecordToolbar(
+            searchField: TextField(
+              controller: searchController,
+              decoration: const InputDecoration(
+                isDense: true,
+                prefixIcon: Icon(Icons.search, size: 19),
+                hintText: 'Search records',
+              ),
+            ),
+            fieldFilter: DropdownButtonFormField<String>(
+              value: activeFilter,
+              isDense: true,
+              isExpanded: true,
+              decoration: const InputDecoration(isDense: true),
+              items: [
+                const DropdownMenuItem<String>(
+                  value: null,
+                  child: Text('All fields'),
+                ),
+                for (final column in columns)
+                  DropdownMenuItem(
+                    value: column.key,
+                    child: Text(column.label, overflow: TextOverflow.ellipsis),
                   ),
-                ),
-              ),
-              PopupMenuButton<String>(
-                tooltip: 'Table layout',
-                icon: const Icon(Icons.menu),
-                onSelected: (value) {
-                  if (value == 'rearrange') {
-                    setState(() {
-                      rearranging = !rearranging;
-                      if (rearranging) {
-                        editingRow = null;
-                        editingKey = null;
-                      }
-                    });
-                  } else if (value == 'reset') {
-                    _resetLayout();
-                  }
-                },
-                itemBuilder:
-                    (_) => [
-                      PopupMenuItem(
-                        value: 'rearrange',
-                        child: Text(
-                          rearranging ? 'Exit Rearrange' : 'Rearrange',
-                        ),
+              ],
+              onChanged: (value) {
+                filterKey = value;
+                _page = 0;
+                _rebuildVisible();
+              },
+            ),
+            valueFilter:
+                activeFilter == null
+                    ? null
+                    : TextField(
+                      controller: filterController,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: 'Filter value',
                       ),
-                      const PopupMenuItem(
-                        value: 'reset',
-                        child: Text('Reset Table Layout'),
-                      ),
-                    ],
-              ),
-              if (rearranging)
-                TextButton(
-                  onPressed: () => setState(() => rearranging = false),
-                  child: const Text('Done'),
-                ),
-              FilledButton.icon(
-                onPressed: adding ? null : _addRecord,
-                icon: const Icon(Icons.add, size: 17),
-                label: const Text('Add Record'),
-              ),
-              Text(
-                '${visibleRows.length} rows${hasPendingChanges ? ' • Unsaved changes' : ''}',
-                style: theme.textTheme.bodySmall,
-              ),
-            ],
+                    ),
+            exportButton: OutlinedButton.icon(
+              onPressed: _exportCsv,
+              icon: const Icon(Icons.file_download_outlined, size: 17),
+              label: const Text('Export'),
+            ),
+            toolsButton: IconButton(
+              tooltip: 'Spreadsheet tools',
+              onPressed: _showSpreadsheetTools,
+              icon: const Icon(Icons.settings_outlined),
+            ),
+            addButton: FilledButton.icon(
+              onPressed: adding ? null : _addRecord,
+              icon: const Icon(Icons.add, size: 17),
+              label: const Text('Add Record'),
+            ),
           ),
         ],
       ),
@@ -966,8 +918,6 @@ class TableScreenState extends State<TableScreen> {
   }
 
   Widget _headerCell(TableColumnDef column) {
-    final active = sortKey == column.key;
-    final index = columns.indexWhere((item) => item.key == column.key);
     return SizedBox(
       width: column.width,
       child: InkWell(
@@ -975,69 +925,49 @@ class TableScreenState extends State<TableScreen> {
         onLongPress: column.custom ? () => _renameColumn(column) : null,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  column.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-              if (active)
-                Icon(
-                  ascending ? Icons.arrow_upward : Icons.arrow_downward,
-                  size: 13,
-                ),
-              if (rearranging) ...[
-                IconButton(
-                  tooltip: 'Move ${column.label} left',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(
-                    minWidth: 26,
-                    minHeight: 28,
-                  ),
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.arrow_back, size: 16),
-                  onPressed:
-                      index == 0 || layoutSaving
-                          ? null
-                          : () => _moveColumn(index, -1),
-                ),
-                IconButton(
-                  tooltip: 'Move ${column.label} right',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(
-                    minWidth: 26,
-                    minHeight: 28,
-                  ),
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.arrow_forward, size: 16),
-                  onPressed:
-                      index == columns.length - 1 || layoutSaving
-                          ? null
-                          : () => _moveColumn(index, 1),
-                ),
-              ],
-            ],
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              column.label.toUpperCase(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: tableHeaderStyle(context),
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _rowCell(SpreadsheetRow row, TableColumnDef column) {
+  double _rowHeight(SpreadsheetRow row) {
+    const style = TextStyle(fontSize: 12.5);
+    final direction = Directionality.of(context);
+    var lines = 1;
+    for (final column in columns) {
+      final editing = editingRow == row && editingKey == column.key;
+      final value =
+          editing ? cellEditor.text : row.values[column.key]?.toString() ?? '';
+      if (!editing && !value.contains('\n')) continue;
+      final count = inlineCellLineCount(
+        value,
+        width: column.width - (editing ? 78 : 20),
+        style: style,
+        direction: direction,
+      );
+      if (count > lines) lines = count;
+    }
+    return inlineCellRowHeight(lines, minimum: 46);
+  }
+
+  Widget _rowCell(SpreadsheetRow row, TableColumnDef column, double rowHeight) {
     final selected = selectedRow == row && selectedKey == column.key;
     final value = row.values[column.key]?.toString() ?? '';
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
       width: column.width,
-      height: 46,
+      height: rowHeight,
       child: InkWell(
+        key: ValueKey('spreadsheet-cell-${row.id}-${column.key}'),
         onTap: () => _select(row, column),
         child: Container(
           alignment: Alignment.centerLeft,
@@ -1114,7 +1044,13 @@ class TableScreenState extends State<TableScreen> {
                                   : TextField(
                                     controller: cellEditor,
                                     focusNode: cellFocus,
-                                    maxLines: 1,
+                                    minLines: 1,
+                                    maxLines:
+                                        column.type == TableValueType.text ||
+                                                column.type ==
+                                                    TableValueType.longText
+                                            ? inlineCellMaxLines
+                                            : 1,
                                     keyboardType:
                                         column.type == TableValueType.number
                                             ? const TextInputType.numberWithOptions(
@@ -1122,14 +1058,30 @@ class TableScreenState extends State<TableScreen> {
                                             )
                                             : column.type == TableValueType.date
                                             ? TextInputType.datetime
-                                            : TextInputType.text,
+                                            : TextInputType.multiline,
+                                    textInputAction:
+                                        column.type == TableValueType.text ||
+                                                column.type ==
+                                                    TableValueType.longText
+                                            ? TextInputAction.newline
+                                            : TextInputAction.done,
                                     decoration: const InputDecoration(
                                       isDense: true,
                                       border: InputBorder.none,
                                     ),
+                                    onChanged:
+                                        column.type == TableValueType.text ||
+                                                column.type ==
+                                                    TableValueType.longText
+                                            ? (_) => setState(() {})
+                                            : null,
                                     onSubmitted:
-                                        (_) => _saveInlineEdit(row, column),
-                                    onTapOutside: (_) => _cancelInlineEdit(),
+                                        column.type == TableValueType.text ||
+                                                column.type ==
+                                                    TableValueType.longText
+                                            ? null
+                                            : (_) =>
+                                                _saveInlineEdit(row, column),
                                   ),
                         ),
                       ),
@@ -1158,11 +1110,9 @@ class TableScreenState extends State<TableScreen> {
                   )
                   : Tooltip(
                     message: value,
-                    child: Text(
-                      value,
-                      maxLines: 1,
-                      softWrap: false,
-                      overflow: TextOverflow.ellipsis,
+                    child: TableValueDisplay(
+                      fieldKey: column.key,
+                      value: value,
                       style: TextStyle(
                         fontSize: 12.5,
                         fontWeight:
@@ -1175,10 +1125,10 @@ class TableScreenState extends State<TableScreen> {
     );
   }
 
-  Widget _grid() {
+  Widget _grid(List<SpreadsheetRow> pageRows, int rowOffset) {
     final scheme = Theme.of(context).colorScheme;
     final tableWidth =
-        164 + columns.fold<double>(0, (sum, column) => sum + column.width);
+        196 + columns.fold<double>(0, (sum, column) => sum + column.width);
     return LayoutBuilder(
       builder:
           (context, constraints) => Scrollbar(
@@ -1194,26 +1144,21 @@ class TableScreenState extends State<TableScreen> {
                 child: Column(
                   children: [
                     Container(
-                      height: 48,
-                      color: scheme.surfaceContainerHighest.withValues(
-                        alpha: .65,
-                      ),
+                      height: 46,
+                      color: tableHeaderColor(context),
                       child: Row(
                         children: [
-                          const SizedBox(
+                          SizedBox(
                             width: 100,
                             child: Center(
                               child: Text(
-                                'S.N',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 12,
-                                ),
+                                '#',
+                                style: tableHeaderStyle(context),
                               ),
                             ),
                           ),
                           ...columns.map(_headerCell),
-                          const SizedBox(width: 64),
+                          const SizedBox(width: 96),
                         ],
                       ),
                     ),
@@ -1223,10 +1168,15 @@ class TableScreenState extends State<TableScreen> {
                         thumbVisibility: true,
                         child: ListView.builder(
                           controller: verticalController,
-                          itemExtent: 46,
-                          itemCount: visibleRows.length,
+                          itemExtentBuilder:
+                              (index, _) =>
+                                  index < pageRows.length
+                                      ? _rowHeight(pageRows[index])
+                                      : null,
+                          itemCount: pageRows.length,
                           itemBuilder: (context, index) {
-                            final row = visibleRows[index];
+                            final row = pageRows[index];
+                            final rowHeight = _rowHeight(row);
                             return ColoredBox(
                               color:
                                   index.isEven
@@ -1236,80 +1186,41 @@ class TableScreenState extends State<TableScreen> {
                                 children: [
                                   SizedBox(
                                     width: 100,
-                                    child:
-                                        rearranging
-                                            ? Row(
-                                              children: [
-                                                IconButton(
-                                                  tooltip: 'Move row up',
-                                                  constraints:
-                                                      const BoxConstraints(
-                                                        minWidth: 25,
-                                                        minHeight: 28,
-                                                      ),
-                                                  padding: EdgeInsets.zero,
-                                                  icon: const Icon(
-                                                    Icons.arrow_upward,
-                                                    size: 15,
-                                                  ),
-                                                  onPressed:
-                                                      index == 0 ||
-                                                              layoutSaving ||
-                                                              !canRearrangeRows
-                                                          ? null
-                                                          : () => _moveRow(
-                                                            index,
-                                                            -1,
-                                                          ),
-                                                ),
-                                                IconButton(
-                                                  tooltip: 'Move row down',
-                                                  constraints:
-                                                      const BoxConstraints(
-                                                        minWidth: 25,
-                                                        minHeight: 28,
-                                                      ),
-                                                  padding: EdgeInsets.zero,
-                                                  icon: const Icon(
-                                                    Icons.arrow_downward,
-                                                    size: 15,
-                                                  ),
-                                                  onPressed:
-                                                      index ==
-                                                                  visibleRows
-                                                                          .length -
-                                                                      1 ||
-                                                              layoutSaving ||
-                                                              !canRearrangeRows
-                                                          ? null
-                                                          : () => _moveRow(
-                                                            index,
-                                                            1,
-                                                          ),
-                                                ),
-                                              ],
-                                            )
-                                            : Center(
-                                              child: Text(
-                                                '${index + 1}',
-                                                style: const TextStyle(
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                            ),
+                                    child: Center(
+                                      child: Text(
+                                        '${rowOffset + index + 1}',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                   ...columns.map(
-                                    (column) => _rowCell(row, column),
+                                    (column) =>
+                                        _rowCell(row, column, rowHeight),
                                   ),
                                   SizedBox(
-                                    width: 64,
-                                    child: IconButton(
-                                      tooltip: 'Delete row',
-                                      icon: const Icon(
-                                        Icons.delete_outline,
-                                        size: 18,
-                                      ),
-                                      onPressed: () => _deleteRow(row),
+                                    width: 96,
+                                    child: Row(
+                                      children: [
+                                        IconButton(
+                                          tooltip: 'Print row',
+                                          icon: const Icon(
+                                            Icons.print_outlined,
+                                            size: 18,
+                                          ),
+                                          onPressed: () => _printRow(row),
+                                        ),
+                                        IconButton(
+                                          tooltip: 'Delete row',
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            size: 18,
+                                          ),
+                                          onPressed: () => _deleteRow(row),
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ],
@@ -1349,6 +1260,8 @@ class TableScreenState extends State<TableScreen> {
         onCreate: _createSetup,
       );
     }
+    final window = tablePageWindow(visibleRows.length, _page, _pageSize);
+    final pageRows = visibleRows.sublist(window.start, window.end);
     return Column(
       children: [
         ConstrainedBox(
@@ -1357,18 +1270,57 @@ class TableScreenState extends State<TableScreen> {
           ),
           child: SingleChildScrollView(child: _toolbar()),
         ),
-        const Divider(height: 1),
         Expanded(
-          child:
-              visibleRows.isEmpty
-                  ? Center(
-                    child: Text(
-                      rows.isEmpty && searchController.text.trim().isEmpty
-                          ? 'No ${kind == TableKind.bookings ? 'bookings' : 'products'} yet. Use Add Record or Import.'
-                          : 'No matching records found.',
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            child: Container(
+              decoration: tablePanelDecoration(context),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Column(
+                  children: [
+                    Expanded(
+                      child:
+                          visibleRows.isEmpty
+                              ? Center(
+                                child: Text(
+                                  rows.isEmpty &&
+                                          searchController.text.trim().isEmpty
+                                      ? 'No ${kind == TableKind.bookings ? 'bookings' : 'products'} yet. Use Add Record or Import.'
+                                      : 'No matching records found.',
+                                ),
+                              )
+                              : _grid(pageRows, window.start),
                     ),
-                  )
-                  : _grid(),
+                    TablePagination(
+                      total: visibleRows.length,
+                      page: window.page,
+                      pageSize: _pageSize,
+                      onPageChanged:
+                          (page) => setState(() {
+                            editingRow = null;
+                            editingKey = null;
+                            _page = page;
+                            if (verticalController.hasClients) {
+                              verticalController.jumpTo(0);
+                            }
+                          }),
+                      onPageSizeChanged:
+                          (size) => setState(() {
+                            editingRow = null;
+                            editingKey = null;
+                            _page = 0;
+                            _pageSize = size;
+                            if (verticalController.hasClients) {
+                              verticalController.jumpTo(0);
+                            }
+                          }),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       ],
     );

@@ -193,12 +193,8 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
                 'store_inventory',
                 'Inventory',
                 Icons.inventory_2_outlined,
-                [
-                  group('store_products', 'Products', Icons.grid_on_outlined, [
-                    leaf('products'),
-                  ]),
-                  leaf('purchases'),
-                ],
+                [leaf('products'), leaf('purchases')],
+                defaultModuleKey: 'products',
               ),
               tableNode(),
               leaf('company_assets'),
@@ -236,7 +232,7 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
                 'business',
                 'Business',
                 Icons.account_balance_wallet_outlined,
-                [leaf('sales'), leaf('finance'), leaf('reports')],
+                [leaf('sales'), leaf('reports')],
               ),
               group(
                 'administration',
@@ -430,6 +426,7 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
                 widget.selectedKey == 'table'
             : node.module?.key == widget.selectedKey &&
                 node.id != 'travel' &&
+                node.id != 'store_inventory' &&
                 (node.id != 'table_all' || widget.selectedTableId == null) &&
                 (node.id != 'table_root' || widget.selectedTableId == null);
     final containsSelected = _containsSelected(node);
@@ -447,7 +444,8 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
               onTap: () {
                 if (node.isGroup) {
                   expanded.add(node.id);
-                  if (node.id == 'travel' && node.module != null) {
+                  if ((node.id == 'travel' || node.id == 'store_inventory') &&
+                      node.module != null) {
                     widget.onNavigate(node.module!);
                   }
                   widget.onToggleCollapsed();
@@ -490,13 +488,15 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
               onTap: () {
                 if (node.isGroup) {
                   setState(() {
-                    if (node.id == 'travel') {
+                    if (node.id == 'travel' || node.id == 'store_inventory') {
                       expanded.add(node.id);
                     } else if (!expanded.add(node.id)) {
                       expanded.remove(node.id);
                     }
                   });
-                  if ((node.id == 'table_root' || node.id == 'travel') &&
+                  if ((node.id == 'table_root' ||
+                          node.id == 'travel' ||
+                          node.id == 'store_inventory') &&
                       node.module != null) {
                     widget.onNavigate(node.module!);
                   }
@@ -544,12 +544,12 @@ class _WorkspaceNavigationState extends State<WorkspaceNavigation> {
                         ),
                       ),
                       if (node.isGroup)
-                        node.id == 'travel'
+                        node.id == 'travel' || node.id == 'store_inventory'
                             ? IconButton(
                               tooltip:
                                   open
-                                      ? 'Collapse Travel operations'
-                                      : 'Expand Travel operations',
+                                      ? 'Collapse ${node.title}'
+                                      : 'Expand ${node.title}',
                               padding: EdgeInsets.zero,
                               constraints: const BoxConstraints.tightFor(
                                 width: 32,

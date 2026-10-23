@@ -164,15 +164,61 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('FreshMart Table is separate from Inventory', (tester) async {
-    await tester.pumpWidget(navigationHarness(grocery: true));
+  testWidgets('Inventory opens Products & inventory in one tap', (
+    tester,
+  ) async {
+    String? destination;
+    await tester.pumpWidget(
+      navigationHarness(
+        grocery: true,
+        onNavigate: (module) => destination = module.key,
+      ),
+    );
     expect(find.text('Table'), findsOneWidget);
     await tester.tap(find.text('Inventory'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Products'));
-    await tester.pumpAndSettle();
+    expect(destination, 'products');
     expect(find.text('Products & inventory'), findsOneWidget);
+    expect(find.text('Purchasing'), findsOneWidget);
+    expect(find.text('Products'), findsNothing);
     expect(find.text('Table'), findsOneWidget);
+  });
+
+  testWidgets('Inventory arrow only expands the menu', (tester) async {
+    String? destination;
+    await tester.pumpWidget(
+      navigationHarness(
+        grocery: true,
+        onNavigate: (module) => destination = module.key,
+      ),
+    );
+    await tester.tap(find.byTooltip('Expand Inventory'));
+    await tester.pumpAndSettle();
+    expect(destination, isNull);
+    expect(find.text('Products & inventory'), findsOneWidget);
+    expect(find.text('Purchasing'), findsOneWidget);
+    expect(find.text('Products'), findsNothing);
+    await tester.tap(find.byTooltip('Collapse Inventory'));
+    await tester.pumpAndSettle();
+    expect(find.text('Products & inventory'), findsNothing);
+  });
+
+  testWidgets('collapsed Inventory icon opens Products & inventory', (
+    tester,
+  ) async {
+    String? destination;
+    var expanded = false;
+    await tester.pumpWidget(
+      navigationHarness(
+        grocery: true,
+        collapsed: true,
+        onNavigate: (module) => destination = module.key,
+        onToggleCollapsed: () => expanded = true,
+      ),
+    );
+    await tester.tap(find.byTooltip('Inventory'));
+    expect(destination, 'products');
+    expect(expanded, isTrue);
   });
 
   testWidgets('Payment methods is a sidebar destination in both workspaces', (
@@ -212,6 +258,28 @@ void main() {
     await tester.enterText(find.byType(TextField), 'audit');
     await tester.pumpAndSettle();
     expect(find.text('Audit trail'), findsNothing);
+  });
+
+  testWidgets('Wallet & ledger is no longer an AeroDesk destination', (
+    tester,
+  ) async {
+    expect(airlineModules.any((module) => module.key == 'finance'), isFalse);
+    await tester.pumpWidget(navigationHarness());
+    expect(find.text('Wallet & ledger'), findsNothing);
+    await tester.ensureVisible(find.text('Business'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Business'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sales'), findsOneWidget);
+    expect(find.text('Reports'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'Wallet & ledger');
+    await tester.pump();
+    expect(
+      find.byWidgetPredicate(
+        (widget) => widget is Text && widget.data == 'Wallet & ledger',
+      ),
+      findsNothing,
+    );
   });
 
   testWidgets('account footer retains password action', (tester) async {

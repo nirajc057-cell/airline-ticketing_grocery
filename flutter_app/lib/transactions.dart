@@ -5,6 +5,7 @@ import 'form_sheet.dart';
 import 'modules.dart';
 import 'payment_dialog.dart';
 import 'pos_pricing.dart';
+import 'record_print.dart';
 
 class RecordAction {
   const RecordAction(
@@ -123,50 +124,6 @@ List<RecordAction> recordActions(
     return const [];
   }
   switch (key) {
-    case 'finance':
-      if (row['id']?.toString().startsWith('ADJ') == true &&
-          row['status'] == 'Pending') {
-        return [
-          RecordAction(
-            'Approve adjustment',
-            'POST',
-            (_) => '/api/wallet/adjustments/$id/approve',
-            body: const {'approve': true},
-          ),
-          RecordAction(
-            'Reject adjustment',
-            'POST',
-            (_) => '/api/wallet/adjustments/$id/approve',
-            body: const {'approve': false},
-          ),
-        ];
-      }
-      if (row['id']?.toString().startsWith('PER') == true &&
-          row['status'] == 'Locked') {
-        return [
-          RecordAction(
-            'Unlock period',
-            'POST',
-            (_) => '/api/finance/periods/$id/unlock',
-          ),
-        ];
-      }
-      if (row['id']?.toString().startsWith('LE') == true &&
-          row['status'] == 'Posted' &&
-          row['reversedByJournalId'] == null) {
-        return [
-          RecordAction(
-            'Reverse journal',
-            'POST',
-            (_) => '/api/ledger/$id/reverse',
-            fields: const [
-              FieldSpec('date', 'Reversal date', type: FieldType.date),
-              FieldSpec('reason', 'Reason', required: true),
-            ],
-          ),
-        ];
-      }
-      return const [];
     case 'bookings':
       return [
         if (row['paymentStatus'] != 'Paid')
@@ -310,6 +267,42 @@ List<RecordAction> recordActions(
   return const [];
 }
 
+RecordPrintData freshMartSaleReceiptData(Map<String, dynamic> sale) {
+  final items = asRows(sale['items']);
+  return RecordPrintData(
+    brand: 'FreshMart',
+    title: 'Sales receipt',
+    reference: displayValue(sale['receipt'] ?? sale['id']),
+    fields: [
+      if (sale['createdAt'] != null)
+        RecordPrintField('Date', displayValue(sale['createdAt'])),
+      if (sale['cashier'] != null)
+        RecordPrintField('Cashier', displayValue(sale['cashier'])),
+      for (final item in items)
+        RecordPrintField(
+          '${displayValue(item['name'])} x ${displayValue(item['qty'])}',
+          displayValue(
+            item['total'] ??
+                ((item['price'] as num?)?.toDouble() ?? 0) *
+                    ((item['qty'] as num?)?.toDouble() ?? 0),
+          ),
+        ),
+      if (sale['subtotal'] != null)
+        RecordPrintField('Subtotal', displayValue(sale['subtotal'])),
+      if (sale['discount'] != null)
+        RecordPrintField('Discount', displayValue(sale['discount'])),
+      if (sale['tax'] != null)
+        RecordPrintField('Tax', displayValue(sale['tax'])),
+      if (sale['roundingAdjustment'] != null)
+        RecordPrintField('Round-off', displayValue(sale['roundingAdjustment'])),
+      if (sale['total'] != null)
+        RecordPrintField('Total', displayValue(sale['total'])),
+      if (sale['payment'] != null)
+        RecordPrintField('Payment method', displayValue(sale['payment'])),
+    ],
+  );
+}
+
 class PosScreen extends StatefulWidget {
   const PosScreen({
     super.key,
@@ -328,6 +321,7 @@ class PosScreen extends StatefulWidget {
 
 class _PosScreenState extends State<PosScreen> {
   final Map<String, int> cart = {};
+  RecordPrintData? lastReceipt;
   String search = '';
   String? scanFeedback;
   bool scanSucceeded = false;
@@ -476,6 +470,16 @@ class _PosScreenState extends State<PosScreen> {
     taxChoice = 'default';
   });
 
+  Future<void> _printLastReceipt() async {
+    final receipt = lastReceipt;
+    if (receipt == null) return;
+    try {
+      await printRecord(receipt);
+    } catch (error) {
+      if (mounted) widget.message('Could not print receipt: $error');
+    }
+  }
+
   Future<void> checkout() async {
     if (cart.isEmpty) return;
     late final PosPricing salePricing;
@@ -519,6 +523,7 @@ class _PosScreenState extends State<PosScreen> {
       );
       if (!mounted) return;
       clearSale();
+      setState(() => lastReceipt = freshMartSaleReceiptData(result));
       widget.message('Sale ${result['receipt']} completed');
       widget.onUpdated();
       if (MediaQuery.sizeOf(context).width >= 600) {
@@ -725,6 +730,15 @@ class _PosScreenState extends State<PosScreen> {
                   TextButton(onPressed: clearSale, child: const Text('Clear')),
               ],
             ),
+            if (lastReceipt != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _printLastReceipt,
+                  icon: const Icon(Icons.print_outlined),
+                  label: const Text('Print last receipt'),
+                ),
+              ),
             if (cart.isEmpty)
               Expanded(
                 child: Center(

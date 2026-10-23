@@ -28,6 +28,23 @@ class _PosApi extends ApiClient {
 }
 
 void main() {
+  test('FreshMart receipt includes sale totals but not internal margin', () {
+    final receipt = freshMartSaleReceiptData({
+      'receipt': 'FM-1',
+      'items': [
+        {'name': 'Rice', 'qty': 2, 'total': 200},
+      ],
+      'subtotal': 200,
+      'total': 210,
+      'payment': 'Cash',
+      'profit': 40,
+    });
+    expect(receipt.reference, 'FM-1');
+    expect(receipt.fields.any((field) => field.label == 'Rice x 2'), isTrue);
+    expect(receipt.fields.any((field) => field.label == 'Total'), isTrue);
+    expect(receipt.fields.any((field) => field.label == 'Profit'), isFalse);
+  });
+
   test('discount is deducted before custom tax', () {
     final value = calculatePosPricing(
       subtotal: 100,
@@ -245,6 +262,7 @@ void main() {
     expect(api.sale?['taxRate'], 7.5);
     expect((api.sale?['payments'] as List).single['amount'], 97);
     expect(api.sale?['roundToWhole'], true);
+    expect(find.text('Print last receipt'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

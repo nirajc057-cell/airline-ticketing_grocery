@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:aerodesk_client/main.dart';
 import 'package:aerodesk_client/api.dart';
@@ -38,10 +39,125 @@ class _FakeApi extends ApiClient {
   }
 }
 
+class _BookingEditApi extends _FakeApi {
+  String? editedPath;
+  Map<String, dynamic>? editedBody;
+  String customerName = 'Test Passenger';
+
+  @override
+  Future<dynamic> get(String path) async {
+    if (path == '/api/bookings' || path.startsWith('/api/bookings?search=')) {
+      return [
+        {
+          'id': 'BK-TEST',
+          'pnr': 'ABC123',
+          'customerName': customerName,
+          'origin': 'KTM',
+          'destination': 'DXB',
+          'travelDate': '2026-10-01',
+          'status': 'On hold',
+          'paymentStatus': 'Pending',
+          'total': 100,
+        },
+      ];
+    }
+    return super.get(path);
+  }
+
+  @override
+  Future<dynamic> patch(String path, Object body) async {
+    editedPath = path;
+    editedBody = Map<String, dynamic>.from(body as Map);
+    customerName = editedBody!['customerName'].toString();
+    return {'id': 'BK-TEST', ...editedBody!};
+  }
+}
+
+class _PagedBookingApi extends _FakeApi {
+  @override
+  Future<dynamic> get(String path) async {
+    if (path == '/api/bookings' || path.startsWith('/api/bookings?search=')) {
+      return [
+        for (var number = 1; number <= 12; number++)
+          {
+            'id': 'BK-$number',
+            'customerName': 'Passenger $number',
+            'origin': 'KTM',
+            'destination': 'DEL',
+            'travelDate': '2026-10-22',
+            'status': 'Confirmed',
+          },
+      ];
+    }
+    return super.get(path);
+  }
+}
+
+class _GroceryProductEditApi extends ApiClient {
+  String name = 'Rice';
+  String? editedPath;
+  Map<String, dynamic>? editedBody;
+
+  @override
+  Future<dynamic> get(String path) async {
+    if (path == '/api/grocery/products' ||
+        path.startsWith('/api/grocery/products?search=')) {
+      return [
+        {
+          'id': 'PR-1',
+          'name': name,
+          'sku': 'RICE-1',
+          'barcode': '10001',
+          'price': 100,
+          'cost': 80,
+          'stock': 5,
+          'status': 'Active',
+        },
+      ];
+    }
+    throw StateError('Unexpected GET $path');
+  }
+
+  @override
+  Future<dynamic> patch(String path, Object body) async {
+    editedPath = path;
+    editedBody = Map<String, dynamic>.from(body as Map);
+    name = editedBody!['name'].toString();
+    return {'id': 'PR-1', 'name': name};
+  }
+}
+
+class _GroceryReportsApi extends ApiClient {
+  @override
+  Future<dynamic> get(String path) async {
+    if (path == '/api/grocery/bootstrap') {
+      return {
+        'stats': {
+          'products': 9,
+          'sales': 4,
+          'purchases': 1,
+          'suppliers': 2,
+          'customers': 1,
+          'expenses': 1,
+        },
+      };
+    }
+    if ({
+      '/api/grocery/sales',
+      '/api/grocery/products',
+      '/api/grocery/expenses',
+    }.contains(path)) {
+      return <Object>[];
+    }
+    throw StateError('Unexpected GET $path');
+  }
+}
+
 class _TableApi extends ApiClient {
-  _TableApi({this.initialized = true});
+  _TableApi({this.initialized = true, this.recordCount = 1});
 
   bool initialized;
+  final int recordCount;
   Map<String, dynamic>? lastPatch;
   Map<String, dynamic>? setupBody;
   List<String> layoutColumns = [];
@@ -72,16 +188,18 @@ class _TableApi extends ApiClient {
     }
     if (path == '/api/bookings' || path.startsWith('/api/bookings?search=')) {
       return [
-        {
-          'id': 'BK-1',
-          'reference': 'BK-1',
-          'customerName': 'Test Passenger',
-          'origin': 'KTM',
-          'destination': 'DXB',
-          'total': 100,
-          'status': 'On hold',
-          'paymentStatus': 'Pending',
-        },
+        for (var index = 0; index < recordCount; index++)
+          {
+            'id': 'BK-${index + 1}',
+            'reference': 'BK-${index + 1}',
+            'customerName':
+                index == 0 ? 'Test Passenger' : 'Passenger ${index + 1}',
+            'origin': 'KTM',
+            'destination': 'DXB',
+            'total': 100,
+            'status': 'On hold',
+            'paymentStatus': 'Pending',
+          },
       ];
     }
     throw StateError('Unexpected request: $path');
@@ -247,13 +365,321 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.byType(DataTable), findsOneWidget);
+    expect(find.byKey(const ValueKey('record-table')), findsOneWidget);
     expect(find.text('Test Passenger'), findsOneWidget);
+    expect(find.byIcon(Icons.unfold_more), findsNothing);
   });
 
-  testWidgets('module table follows form labels, edits and saves its layout', (
+  testWidgets('record search, status, manage and add share one toolbar row', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(1500, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bookings = airlineModules.firstWhere(
+      (module) => module.key == 'bookings',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _FakeApi(),
+            module: bookings,
+            grocery: false,
+            user: const {'name': 'Tester', 'role': 'Agency owner'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final centers = [
+      tester.getCenter(find.byType(TextField).first).dy,
+      tester.getCenter(find.byType(DropdownButtonFormField<String>).first).dy,
+      tester.getCenter(find.text('Manage form fields')).dy,
+      tester.getCenter(find.text('Add Record')).dy,
+    ];
+    expect(
+      centers.reduce((a, b) => a > b ? a : b) -
+          centers.reduce((a, b) => a < b ? a : b),
+      lessThan(12),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('FreshMart record controls share a desktop row', (tester) async {
+    tester.view.physicalSize = const Size(1500, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final products = groceryModules.firstWhere(
+      (module) => module.key == 'products',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _GroceryProductEditApi(),
+            module: products,
+            grocery: true,
+            user: const {'name': 'Tester', 'role': 'Agency owner'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final centers = [
+      tester.getCenter(find.byType(TextField).first).dy,
+      tester.getCenter(find.byType(DropdownButtonFormField<String>).first).dy,
+      tester.getCenter(find.text('Manage form fields')).dy,
+      tester.getCenter(find.text('Add Record')).dy,
+    ];
+    expect(
+      centers.reduce((a, b) => a > b ? a : b) -
+          centers.reduce((a, b) => a < b ? a : b),
+      lessThan(12),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('record controls wrap without overflow on a phone', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bookings = airlineModules.firstWhere(
+      (module) => module.key == 'bookings',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _FakeApi(),
+            module: bookings,
+            grocery: false,
+            user: const {'name': 'Tester', 'role': 'Agency owner'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Manage form fields'), findsOneWidget);
+    expect(find.text('Add Record'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('booking records paginate in the reference table layout', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bookings = airlineModules.firstWhere(
+      (module) => module.key == 'bookings',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _PagedBookingApi(),
+            module: bookings,
+            grocery: false,
+            user: const {'name': 'Tester'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Showing 1 to 10 of 12 entries'), findsOneWidget);
+    expect(find.text('Passenger 11'), findsNothing);
+    await tester.tap(find.byTooltip('Next page'));
+    await tester.pumpAndSettle();
+    expect(find.text('Showing 11 to 12 of 12 entries'), findsOneWidget);
+    expect(find.text('Passenger 11'), findsOneWidget);
+  });
+
+  testWidgets('booking cell uses newline and explicit save or cancel', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _BookingEditApi();
+    final bookings = airlineModules.firstWhere(
+      (module) => module.key == 'bookings',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: api,
+            module: bookings,
+            grocery: false,
+            user: const {'name': 'Tester'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Test Passenger'));
+    await tester.pump();
+    final editor = find.byKey(const ValueKey('module-cell-editor'));
+    expect(
+      tester.widget<TextField>(editor).textInputAction,
+      TextInputAction.newline,
+    );
+    await tester.enterText(editor, 'First line');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(api.editedBody, isNull);
+    await tester.enterText(editor, 'First line\nSecond line');
+    await tester.pump();
+    expect(find.byTooltip('Save cell'), findsOneWidget);
+    expect(find.byTooltip('Cancel edit'), findsOneWidget);
+    await tester.tap(find.byTooltip('Save cell'));
+    await tester.pumpAndSettle();
+    expect(api.editedPath, '/api/bookings/BK-TEST');
+    expect(api.editedBody?['customerName'], 'First line\nSecond line');
+    final cell = find.byKey(const ValueKey('module-cell-BK-TEST-customerName'));
+    expect(
+      tester
+          .widget<Text>(find.descendant(of: cell, matching: find.byType(Text)))
+          .data,
+      'First line\nSecond line',
+    );
+
+    await tester.tap(cell);
+    await tester.pump();
+    await tester.enterText(editor, 'Discard me');
+    await tester.tap(find.byTooltip('Cancel edit'));
+    await tester.pumpAndSettle();
+    expect(api.editedBody?['customerName'], 'First line\nSecond line');
+  });
+
+  testWidgets('FreshMart product table saves multiline text with tick', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _GroceryProductEditApi();
+    final products = groceryModules.firstWhere(
+      (module) => module.key == 'products',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: api,
+            module: products,
+            grocery: true,
+            user: const {'name': 'Tester'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rice'));
+    await tester.pump();
+    final editor = find.byKey(const ValueKey('module-cell-editor'));
+    expect(
+      tester.widget<TextField>(editor).textInputAction,
+      TextInputAction.newline,
+    );
+    await tester.enterText(editor, 'Rice\nPremium');
+    await tester.pump();
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('module-cell-PR-1-name')))
+          .height,
+      greaterThan(48),
+    );
+    await tester.tap(find.byTooltip('Save cell'));
+    await tester.pumpAndSettle();
+    expect(api.editedPath, '/api/grocery/products/PR-1');
+    expect(api.editedBody?['name'], 'Rice\nPremium');
+    expect(api.editedBody?['tableEdit'], true);
+  });
+
+  testWidgets('booking details offer a print option', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bookings = airlineModules.firstWhere(
+      (module) => module.key == 'bookings',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _FakeApi(),
+            module: bookings,
+            grocery: false,
+            user: const {'name': 'Tester'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byTooltip('Details'));
+    await tester.tap(find.byTooltip('Details'));
+    await tester.pumpAndSettle();
+    expect(find.text('Print'), findsOneWidget);
+    expect(find.byIcon(Icons.print_outlined), findsOneWidget);
+    expect(find.text('Issue ticket'), findsOneWidget);
+  });
+
+  testWidgets('FreshMart record details offer a print option', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final products = groceryModules.firstWhere(
+      (module) => module.key == 'products',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _FakeApi(),
+            module: products,
+            grocery: true,
+            user: const {'name': 'Tester'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byTooltip('Details'));
+    await tester.tap(find.byTooltip('Details'));
+    await tester.pumpAndSettle();
+    expect(find.text('Print'), findsOneWidget);
+    expect(find.byIcon(Icons.print_outlined), findsOneWidget);
+  });
+
+  testWidgets('module table edits cells without a layout menu', (tester) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -277,31 +703,34 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Assigned equipment'), findsOneWidget);
+    expect(find.text('ASSIGNED EQUIPMENT'), findsOneWidget);
     await tester.tap(find.text('Laptop'));
     await tester.pump();
     await tester.enterText(
       find.byKey(const ValueKey('module-cell-editor')),
       'Tablet',
     );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(api.editedPath, isNull);
+    await tester.enterText(
+      find.byKey(const ValueKey('module-cell-editor')),
+      'Tablet\nExtra line',
+    );
+    await tester.pump();
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('module-cell-A-1-assetName')))
+          .height,
+      greaterThan(48),
+    );
     await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
     expect(api.editedPath, '/api/company-assets/A-1');
-    expect(api.editedBody!['assetName'], 'Tablet');
-    await tester.tap(find.byTooltip('Table layout'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Rearrange'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Move Employee name left'));
-    await tester.pumpAndSettle();
-    expect(api.columns.first, 'employeeName');
-    await tester.tap(find.byTooltip('Move row down').first);
-    await tester.pumpAndSettle();
-    expect(api.order.first, 'A-2');
-    await tester.tap(find.byTooltip('Table layout'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Reset Table Layout'));
-    await tester.pumpAndSettle();
+    expect(api.editedBody!['assetName'], 'Tablet\nExtra line');
+    expect(find.byTooltip('Table layout'), findsNothing);
+    expect(find.text('Rearrange'), findsNothing);
+    expect(find.text('Reset Table Layout'), findsNothing);
     expect(api.columns, isEmpty);
     expect(api.order, isEmpty);
   });
@@ -372,6 +801,79 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('store performance metrics stay in one scrollable row', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final reports = groceryModules.firstWhere(
+      (module) => module.key == 'reports',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModuleScreen(
+            api: _GroceryReportsApi(),
+            module: reports,
+            grocery: true,
+            user: const {'name': 'Tester'},
+            onUpdated: () {},
+            message: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final strip = find.byKey(const ValueKey('store-performance-metrics'));
+    expect(strip, findsOneWidget);
+    expect(
+      tester.widget<SingleChildScrollView>(strip).scrollDirection,
+      Axis.horizontal,
+    );
+    final tops = [
+      for (final label in [
+        'PRODUCTS',
+        'SALES',
+        'PURCHASES',
+        'SUPPLIERS',
+        'CUSTOMERS',
+        'EXPENSES',
+      ])
+        tester.getTopLeft(find.text(label)).dy,
+    ];
+    expect(
+      tops.reduce((a, b) => a > b ? a : b) -
+          tops.reduce((a, b) => a < b ? a : b),
+      lessThan(2),
+    );
+    final financialTops = [
+      for (final label in [
+        'TOTAL SALES',
+        'GROSS PROFIT',
+        'NET AFTER EXPENSES',
+        'STOCK AT COST',
+        'STOCK AT RETAIL',
+      ])
+        tester.getTopLeft(find.text(label)).dy,
+    ];
+    expect(
+      financialTops.reduce((a, b) => a > b ? a : b) -
+          financialTops.reduce((a, b) => a < b ? a : b),
+      lessThan(2),
+    );
+    final initialPosition = tester.getTopLeft(find.text('EXPENSES')).dx;
+    await tester.drag(strip, const Offset(-500, 0));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('EXPENSES')).dx,
+      lessThan(initialPosition),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('table edits a booking cell and saves via the existing API', (
     tester,
   ) async {
@@ -397,13 +899,61 @@ void main() {
     expect(find.text('Add Record'), findsOneWidget);
     await tester.tap(find.text('Test Passenger'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField).last, 'Updated Passenger');
+    await tester.enterText(find.byType(TextField).last, 'Updated');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(api.lastPatch, isNull);
+    expect(
+      tester.widget<TextField>(find.byType(TextField).last).textInputAction,
+      TextInputAction.newline,
+    );
+    await tester.enterText(find.byType(TextField).last, 'Updated\nPassenger');
+    await tester.pump();
+    expect(
+      tester
+          .getSize(
+            find.byKey(const ValueKey('spreadsheet-cell-BK-1-customerName')),
+          )
+          .height,
+      greaterThan(46),
+    );
+    expect(find.byTooltip('Save cell'), findsOneWidget);
+    expect(find.byTooltip('Cancel edit'), findsOneWidget);
     await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
     expect(api.lastPatch, {
-      'customerName': 'Updated Passenger',
+      'customerName': 'Updated\nPassenger',
       'tableEdit': true,
     });
+    await tester.tap(find.text('Updated\nPassenger'));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField).last, 'Discarded');
+    await tester.tap(find.byTooltip('Cancel edit'));
+    await tester.pumpAndSettle();
+    expect(api.lastPatch?['customerName'], 'Updated\nPassenger');
+    expect(find.byTooltip('Print row'), findsOneWidget);
+  });
+
+  testWidgets('linked booking table paginates records', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TableScreen(
+            api: _TableApi(recordCount: 12),
+            grocery: false,
+            message: (_) {},
+            onUpdated: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Showing 1 to 10 of 12 entries'), findsOneWidget);
+    expect(find.text('Passenger 11'), findsNothing);
+    await tester.tap(find.byTooltip('Next page'));
+    await tester.pumpAndSettle();
+    expect(find.text('Showing 11 to 12 of 12 entries'), findsOneWidget);
+    expect(find.text('Passenger 11'), findsOneWidget);
   });
 
   testWidgets('search refresh keeps an unsaved draft row', (tester) async {
@@ -451,11 +1001,47 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Add Record'), findsOneWidget);
-    expect(find.text('Search table data'), findsOneWidget);
+    expect(find.text('Search records'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('linked table column order saves and reset keeps records', (
+  testWidgets('linked table controls align in one row on desktop', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TableScreen(
+            api: _TableApi(),
+            grocery: false,
+            message: (_) {},
+            onUpdated: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final centers = [
+      tester.getCenter(find.widgetWithText(TextField, 'Search records')).dy,
+      tester.getCenter(find.text('All fields')).dy,
+      tester.getCenter(find.text('Export')).dy,
+      tester.getCenter(find.byTooltip('Spreadsheet tools')).dy,
+      tester.getCenter(find.text('Add Record')).dy,
+    ];
+    expect(
+      centers.reduce((a, b) => a > b ? a : b) -
+          centers.reduce((a, b) => a < b ? a : b),
+      lessThan(14),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('linked table keeps records without a layout menu', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1500, 900);
@@ -476,20 +1062,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Table layout'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Rearrange'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Move Reference right'));
-    await tester.pumpAndSettle();
-    expect(
-      api.layoutColumns.indexOf('pnr'),
-      lessThan(api.layoutColumns.indexOf('reference')),
-    );
-    await tester.tap(find.byTooltip('Table layout'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Reset Table Layout'));
-    await tester.pumpAndSettle();
+    expect(find.byTooltip('Table layout'), findsNothing);
+    expect(find.text('Rearrange'), findsNothing);
+    expect(find.text('Reset Table Layout'), findsNothing);
+    expect(find.byIcon(Icons.unfold_more), findsNothing);
     expect(api.layoutColumns, isEmpty);
     expect(find.text('Test Passenger'), findsOneWidget);
   });

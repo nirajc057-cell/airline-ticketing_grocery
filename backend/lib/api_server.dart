@@ -1748,6 +1748,10 @@ class AeroDeskServer {
             '${updated['origin'] ?? ''} → ${updated['destination'] ?? ''}';
       }
     }
+    if (path == '/api/quotes' &&
+        (body.containsKey('fare') || body.containsKey('serviceFee'))) {
+      updated['total'] = _num(updated['fare']) + _num(updated['serviceFee']);
+    }
     if (tableEdit && path == '/api/bookings') {
       final removed = bookingFormConfig(state)['removed'] as List;
       final total = _num(updated['total']);

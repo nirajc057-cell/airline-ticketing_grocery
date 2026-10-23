@@ -11,8 +11,11 @@ import 'package:share_plus/share_plus.dart';
 
 import 'api.dart';
 import 'form_sheet.dart';
+import 'inline_cell_layout.dart';
 import 'modules.dart';
 import 'named_table_repository.dart';
+import 'record_print.dart';
+import 'table_view_ui.dart';
 
 enum _TableSelection { none, row, column, cell }
 
@@ -64,8 +67,9 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   bool saving = false;
   bool dirty = false;
   bool showFilter = false;
-  bool rearranging = false;
   bool addingRow = false;
+  int _page = 0;
+  int _pageSize = 10;
   String? error;
   int loadSerial = 0;
   int localId = 0;
@@ -81,6 +85,33 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
           .firstOrNull;
 
   bool get hasPendingChanges => dirty;
+
+  Future<void> _printRow(NamedTableRow row, int rowNumber) async {
+    final current = table;
+    if (current == null) return;
+    final cells = Map<String, String>.of(row.cells);
+    if (editingRowId == row.id && editingColumnId != null) {
+      cells[editingColumnId!] = cellEditor.text;
+    }
+    try {
+      await printRecord(
+        RecordPrintData(
+          brand: widget.grocery ? 'FreshMart' : 'AeroDesk',
+          title: '${current.name} row${dirty ? ' (draft)' : ''}',
+          reference: 'Row $rowNumber',
+          fields: [
+            for (final column in current.columns)
+              if (!isSensitivePrintField(column.id) &&
+                  !isSensitivePrintField(column.label))
+                RecordPrintField(column.label, displayValue(cells[column.id])),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) widget.message('Could not print row: $error');
+    }
+  }
+
   String _newId(String prefix) =>
       '$prefix-${DateTime.now().microsecondsSinceEpoch}-${localId++}';
 
@@ -89,7 +120,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     super.initState();
     repository = NamedTableRepository(widget.api);
     search.addListener(_onSearchChanged);
-    filter.addListener(_refresh);
+    filter.addListener(_onFilterChanged);
     _load();
   }
 
@@ -104,6 +135,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       filter.clear();
       filterColumnId = null;
       sortColumnId = null;
+      _page = 0;
       selectedRowId = null;
       selectedColumnId = null;
       editingRowId = null;
@@ -120,7 +152,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     searchSerial++;
     searchTimer?.cancel();
     search.removeListener(_onSearchChanged);
-    filter.removeListener(_refresh);
+    filter.removeListener(_onFilterChanged);
     search.dispose();
     filter.dispose();
     cellEditor.dispose();
@@ -134,7 +166,13 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     if (mounted) setState(() {});
   }
 
+  void _onFilterChanged() {
+    _page = 0;
+    _refresh();
+  }
+
   void _onSearchChanged() {
+    _page = 0;
     searchTimer?.cancel();
     searchSerial++;
     serverSearchIds = null;
@@ -341,16 +379,13 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     }
   }
 
-  Future<bool> _save({bool resetColumnOrder = false}) async {
+  Future<bool> _save() async {
     final current = table;
     if (current == null || saving) return false;
     _finishInlineEdit();
     setState(() => saving = true);
     try {
-      final saved = await repository.save(
-        current,
-        resetColumnOrder: resetColumnOrder,
-      );
+      final saved = await repository.save(current);
       if (!mounted || widget.selectedTableId != saved.id) return false;
       setState(() {
         table = saved;
@@ -377,88 +412,6 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       return false;
     } finally {
       if (mounted) setState(() => saving = false);
-    }
-  }
-
-  bool get canRearrangeRows =>
-      search.text.trim().isEmpty &&
-      filter.text.trim().isEmpty &&
-      sortColumnId == null;
-
-  Future<void> _moveColumn(int index, int direction) async {
-    final current = table;
-    if (current == null ||
-        saving ||
-        index + direction < 0 ||
-        index + direction >= current.columns.length) {
-      return;
-    }
-    _finishInlineEdit();
-    setState(() {
-      final moved = current.columns.removeAt(index);
-      current.columns.insert(index + direction, moved);
-      dirty = true;
-    });
-    await _save();
-  }
-
-  Future<void> _moveRow(int index, int direction) async {
-    final current = table;
-    if (current == null ||
-        saving ||
-        !canRearrangeRows ||
-        index + direction < 0 ||
-        index + direction >= current.rows.length) {
-      return;
-    }
-    _finishInlineEdit();
-    setState(() {
-      final moved = current.rows.removeAt(index);
-      current.rows.insert(index + direction, moved);
-      dirty = true;
-    });
-    await _save();
-  }
-
-  Future<void> _resetLayout() async {
-    final current = table;
-    if (current == null || saving) return;
-    _finishInlineEdit();
-    final columnPositions = {
-      for (var index = 0; index < current.defaultColumnIds.length; index++)
-        current.defaultColumnIds[index]: index,
-    };
-    final rowPositions = {
-      for (var index = 0; index < current.defaultRowIds.length; index++)
-        current.defaultRowIds[index]: index,
-    };
-    final priorColumns = [...current.columns];
-    final priorRows = [...current.rows];
-    setState(() {
-      current.columns.sort(
-        (a, b) => (columnPositions[a.id] ??
-                current.defaultColumnIds.length + priorColumns.indexOf(a))
-            .compareTo(
-              columnPositions[b.id] ??
-                  current.defaultColumnIds.length + priorColumns.indexOf(b),
-            ),
-      );
-      current.rows.sort(
-        (a, b) => (rowPositions[a.id] ??
-                current.defaultRowIds.length + priorRows.indexOf(a))
-            .compareTo(
-              rowPositions[b.id] ??
-                  current.defaultRowIds.length + priorRows.indexOf(b),
-            ),
-      );
-      sortColumnId = null;
-      filterColumnId = null;
-      filter.clear();
-      rearranging = false;
-      dirty = true;
-    });
-    if (await _save(resetColumnOrder: true) && mounted) {
-      widget.message('Table layout reset; record values retained');
     }
   }
 
@@ -912,18 +865,10 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     }
   }
 
-  KeyEventResult _handleCellKey(
-    KeyEvent event,
-    NamedTableRow row,
-    NamedTableColumn column,
-  ) {
+  KeyEventResult _handleCellKey(KeyEvent event) {
     if (event is KeyDownEvent) {
       if (event.logicalKey == LogicalKeyboardKey.escape) {
         _finishInlineEdit();
-        return KeyEventResult.handled;
-      }
-      if (event.logicalKey == LogicalKeyboardKey.enter) {
-        _commitInlineEdit(row, column);
         return KeyEventResult.handled;
       }
     }
@@ -1100,6 +1045,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
           }
           if (filterNeedle.isNotEmpty &&
               filterColumnId != null &&
+              current.columns.any((column) => column.id == filterColumnId) &&
               !(row.cells[filterColumnId] ?? '').toLowerCase().contains(
                 filterNeedle,
               )) {
@@ -1179,94 +1125,128 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
   Widget _toolbar(NamedTable current, List<NamedTableRow> visible) {
     final scheme = Theme.of(context).colorScheme;
     final compact = MediaQuery.sizeOf(context).width < 600;
+    final selectedFilter =
+        current.columns.any((column) => column.id == filterColumnId)
+            ? filterColumnId
+            : null;
     return Material(
       color: scheme.surface,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 14),
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                IconButton(
-                  tooltip: 'All tables',
-                  onPressed: () => widget.onSelectTable(null),
-                  icon: const Icon(Icons.arrow_back),
-                ),
-                Text(
-                  current.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                IconButton(
-                  tooltip: 'Table tools',
-                  onPressed: _showTableTools,
-                  icon: const Icon(Icons.settings_outlined),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
+              alignment: WrapAlignment.spaceBetween,
+              spacing: 12,
               runSpacing: 8,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 SizedBox(
-                  width: compact ? MediaQuery.sizeOf(context).width - 40 : 280,
-                  child: TextField(
-                    controller: search,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      prefixIcon: Icon(Icons.search, size: 20),
-                      hintText: 'Search this table',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                PopupMenuButton<String>(
-                  tooltip: 'Table layout',
-                  icon: const Icon(Icons.menu),
-                  onSelected: (value) {
-                    if (value == 'rearrange') {
-                      _finishInlineEdit();
-                      setState(() => rearranging = !rearranging);
-                    } else if (value == 'reset') {
-                      _resetLayout();
-                    }
-                  },
-                  itemBuilder:
-                      (_) => [
-                        PopupMenuItem(
-                          value: 'rearrange',
-                          child: Text(
-                            rearranging ? 'Exit Rearrange' : 'Rearrange',
-                          ),
+                  width:
+                      compact
+                          ? math.min(280, MediaQuery.sizeOf(context).width - 40)
+                          : 360,
+                  child: Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'All tables',
+                        onPressed: () => widget.onSelectTable(null),
+                        icon: const Icon(Icons.arrow_back),
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'DATA TABLE',
+                              style: TextStyle(
+                                color: scheme.primary,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            Text(
+                              current.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.headlineSmall
+                                  ?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                            Text(
+                              '${visible.length} records in this view',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
                         ),
-                        const PopupMenuItem(
-                          value: 'reset',
-                          child: Text('Reset Table Layout'),
-                        ),
-                      ],
-                ),
-                if (rearranging)
-                  TextButton(
-                    onPressed: () => setState(() => rearranging = false),
-                    child: const Text('Done'),
+                      ),
+                    ],
                   ),
-                FilledButton.tonalIcon(
-                  onPressed: _addRow,
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('Add Record'),
-                ),
-                Text(
-                  '${visible.length} records',
-                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
+            ),
+            const SizedBox(height: 14),
+            TableRecordToolbar(
+              searchField: TextField(
+                controller: search,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  prefixIcon: Icon(Icons.search, size: 19),
+                  hintText: 'Search records',
+                ),
+              ),
+              fieldFilter: DropdownButtonFormField<String>(
+                value: selectedFilter,
+                isDense: true,
+                isExpanded: true,
+                decoration: const InputDecoration(isDense: true),
+                items: [
+                  const DropdownMenuItem<String>(
+                    value: null,
+                    child: Text('All fields'),
+                  ),
+                  for (final column in current.columns)
+                    DropdownMenuItem(
+                      value: column.id,
+                      child: Text(
+                        column.label,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged:
+                    (value) => setState(() {
+                      filterColumnId = value;
+                      _page = 0;
+                    }),
+              ),
+              valueFilter:
+                  selectedFilter == null
+                      ? null
+                      : TextField(
+                        controller: filter,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          hintText: 'Filter value',
+                        ),
+                      ),
+              exportButton: OutlinedButton.icon(
+                onPressed: _exportCsv,
+                icon: const Icon(Icons.file_download_outlined, size: 17),
+                label: const Text('Export'),
+              ),
+              toolsButton: IconButton(
+                tooltip: 'Table tools',
+                onPressed: _showTableTools,
+                icon: const Icon(Icons.settings_outlined),
+              ),
+              addButton: FilledButton.icon(
+                onPressed: _addRow,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add Record'),
+              ),
             ),
           ],
         ),
@@ -1274,14 +1254,37 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     );
   }
 
-  static const _rowHeaderWidth = 136.0;
+  static const _rowHeaderWidth = 104.0;
 
   double _columnWidth(NamedTable current, double available) => math.max(
     190,
     (available - _rowHeaderWidth - 48) / current.columns.length,
   );
 
-  double _dataRowHeight(NamedTableRow row) => 52;
+  double _dataRowHeight(
+    NamedTableRow row,
+    NamedTable current,
+    double available,
+  ) {
+    final style =
+        Theme.of(context).textTheme.bodyMedium ?? const TextStyle(fontSize: 14);
+    final direction = Directionality.of(context);
+    final columnWidth = _columnWidth(current, available);
+    var lines = 1;
+    for (final column in current.columns) {
+      final editing = editingRowId == row.id && editingColumnId == column.id;
+      final value = editing ? cellEditor.text : row.cells[column.id] ?? '';
+      if (!editing && !value.contains('\n')) continue;
+      final count = inlineCellLineCount(
+        value,
+        width: columnWidth - (editing ? 78 : 20),
+        style: style,
+        direction: direction,
+      );
+      if (count > lines) lines = count;
+    }
+    return inlineCellRowHeight(lines);
+  }
 
   Color _cellFill(NamedTableRow row, NamedTableColumn column, Color fallback) {
     final rowColor = _decodeColor(row.color);
@@ -1298,11 +1301,12 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       selectedColumnId = column.id;
       ascending = sortColumnId == column.id ? !ascending : true;
       sortColumnId = column.id;
+      _page = 0;
     });
   }
 
-  Widget _grid(NamedTable current, List<NamedTableRow> visible) {
-    const rowHeight = 52.0;
+  Widget _grid(NamedTable current, List<NamedTableRow> visible, int rowOffset) {
+    const rowHeight = 46.0;
     final scheme = Theme.of(context).colorScheme;
     final width = _rowHeaderWidth + current.columns.length * 190.0 + 48;
     return LayoutBuilder(
@@ -1321,17 +1325,15 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                   children: [
                     Container(
                       height: rowHeight,
-                      color: scheme.surfaceContainerHighest.withValues(
-                        alpha: .65,
-                      ),
+                      color: tableHeaderColor(context),
                       child: Row(
                         children: [
-                          const SizedBox(
+                          SizedBox(
                             width: _rowHeaderWidth,
                             child: Center(
                               child: Text(
-                                'ROW',
-                                style: TextStyle(fontWeight: FontWeight.w700),
+                                '#',
+                                style: tableHeaderStyle(context),
                               ),
                             ),
                           ),
@@ -1383,107 +1385,62 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                           child: Text(
                                             current.columns[index].label.isEmpty
                                                 ? 'Name column ${index + 1}'
-                                                : current.columns[index].label,
+                                                : current.columns[index].label
+                                                    .toUpperCase(),
                                             overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                            ),
+                                            style: tableHeaderStyle(context),
                                           ),
                                         ),
-                                        if (rearranging) ...[
-                                          IconButton(
-                                            tooltip: 'Move column left',
-                                            constraints: const BoxConstraints(
-                                              minWidth: 26,
-                                              minHeight: 28,
-                                            ),
-                                            padding: EdgeInsets.zero,
-                                            icon: const Icon(
-                                              Icons.arrow_back,
-                                              size: 16,
-                                            ),
-                                            onPressed:
-                                                index == 0 || saving
-                                                    ? null
-                                                    : () =>
-                                                        _moveColumn(index, -1),
+                                        PopupMenuButton<String>(
+                                          tooltip: 'Column actions',
+                                          icon: const Icon(
+                                            Icons.more_vert,
+                                            size: 17,
                                           ),
-                                          IconButton(
-                                            tooltip: 'Move column right',
-                                            constraints: const BoxConstraints(
-                                              minWidth: 26,
-                                              minHeight: 28,
-                                            ),
-                                            padding: EdgeInsets.zero,
-                                            icon: const Icon(
-                                              Icons.arrow_forward,
-                                              size: 16,
-                                            ),
-                                            onPressed:
-                                                index ==
-                                                            current
-                                                                    .columns
-                                                                    .length -
-                                                                1 ||
-                                                        saving
-                                                    ? null
-                                                    : () =>
-                                                        _moveColumn(index, 1),
-                                          ),
-                                        ],
-                                        if (!rearranging)
-                                          PopupMenuButton<String>(
-                                            tooltip: 'Column actions',
-                                            icon: const Icon(
-                                              Icons.more_vert,
-                                              size: 17,
-                                            ),
-                                            padding: EdgeInsets.zero,
-                                            onSelected: (action) {
-                                              _finishInlineEdit();
-                                              setState(() {
-                                                selectedColumnId =
-                                                    current.columns[index].id;
-                                                _selection =
-                                                    _TableSelection.column;
-                                              });
-                                              switch (action) {
-                                                case 'name':
-                                                  _editHeader(
-                                                    current.columns[index],
-                                                  );
-                                                case 'sort':
-                                                  _sortColumn(
-                                                    current.columns[index],
-                                                  );
-                                                case 'color':
-                                                  _colorColumn();
-                                                case 'delete':
-                                                  _deleteColumn();
-                                              }
-                                            },
-                                            itemBuilder:
-                                                (_) => const [
-                                                  PopupMenuItem(
-                                                    value: 'name',
-                                                    child: Text('Name header'),
-                                                  ),
-                                                  PopupMenuItem(
-                                                    value: 'sort',
-                                                    child: Text('Sort column'),
-                                                  ),
-                                                  PopupMenuItem(
-                                                    value: 'color',
-                                                    child: Text('Color column'),
-                                                  ),
-                                                  PopupMenuItem(
-                                                    value: 'delete',
-                                                    child: Text(
-                                                      'Delete column',
-                                                    ),
-                                                  ),
-                                                ],
-                                          ),
+                                          padding: EdgeInsets.zero,
+                                          onSelected: (action) {
+                                            _finishInlineEdit();
+                                            setState(() {
+                                              selectedColumnId =
+                                                  current.columns[index].id;
+                                              _selection =
+                                                  _TableSelection.column;
+                                            });
+                                            switch (action) {
+                                              case 'name':
+                                                _editHeader(
+                                                  current.columns[index],
+                                                );
+                                              case 'sort':
+                                                _sortColumn(
+                                                  current.columns[index],
+                                                );
+                                              case 'color':
+                                                _colorColumn();
+                                              case 'delete':
+                                                _deleteColumn();
+                                            }
+                                          },
+                                          itemBuilder:
+                                              (_) => const [
+                                                PopupMenuItem(
+                                                  value: 'name',
+                                                  child: Text('Name header'),
+                                                ),
+                                                PopupMenuItem(
+                                                  value: 'sort',
+                                                  child: Text('Sort column'),
+                                                ),
+                                                PopupMenuItem(
+                                                  value: 'color',
+                                                  child: Text('Color column'),
+                                                ),
+                                                PopupMenuItem(
+                                                  value: 'delete',
+                                                  child: Text('Delete column'),
+                                                ),
+                                              ],
+                                        ),
                                       ],
                                     ),
                                   ),
@@ -1494,7 +1451,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                             width: 48,
                             child: IconButton(
                               tooltip: 'Add form field',
-                              onPressed: rearranging ? null : _addColumn,
+                              onPressed: _addColumn,
                               icon: const Icon(Icons.add, size: 18),
                             ),
                           ),
@@ -1510,12 +1467,20 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                           itemExtentBuilder:
                               (index, _) =>
                                   index < visible.length
-                                      ? _dataRowHeight(visible[index])
+                                      ? _dataRowHeight(
+                                        visible[index],
+                                        current,
+                                        constraints.maxWidth,
+                                      )
                                       : null,
                           itemCount: visible.length,
                           itemBuilder: (context, index) {
                             final row = visible[index];
-                            final dataRowHeight = _dataRowHeight(row);
+                            final dataRowHeight = _dataRowHeight(
+                              row,
+                              current,
+                              constraints.maxWidth,
+                            );
                             return ColoredBox(
                               color:
                                   index.isEven
@@ -1554,7 +1519,7 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                             SizedBox(
                                               width: 32,
                                               child: Text(
-                                                '${index + 1}',
+                                                '${rowOffset + index + 1}',
                                                 textAlign: TextAlign.center,
                                                 style: TextStyle(
                                                   fontWeight:
@@ -1568,123 +1533,85 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                                 ),
                                               ),
                                             ),
-                                            if (rearranging) ...[
-                                              IconButton(
-                                                tooltip: 'Move row up',
-                                                constraints:
-                                                    const BoxConstraints(
-                                                      minWidth: 26,
-                                                      minHeight: 28,
+                                            PopupMenuButton<String>(
+                                              tooltip:
+                                                  'Row ${rowOffset + index + 1} actions',
+                                              icon: Icon(
+                                                Icons.more_vert,
+                                                color:
+                                                    row.notifyAt == null
+                                                        ? scheme
+                                                            .onSurfaceVariant
+                                                        : scheme.primary,
+                                              ),
+                                              padding: EdgeInsets.zero,
+                                              onSelected: (action) {
+                                                _selectRowForAction(row);
+                                                switch (action) {
+                                                  case 'color':
+                                                    _colorRow();
+                                                  case 'notify':
+                                                    _setReminder();
+                                                  case 'clear-notification':
+                                                    _clearReminder();
+                                                  case 'duplicate':
+                                                    _duplicateRow();
+                                                  case 'print':
+                                                    _printRow(
+                                                      row,
+                                                      rowOffset + index + 1,
+                                                    );
+                                                  case 'delete':
+                                                    _deleteRow();
+                                                }
+                                              },
+                                              itemBuilder:
+                                                  (_) => [
+                                                    PopupMenuItem(
+                                                      key: ValueKey(
+                                                        'row-action-color-${row.id}',
+                                                      ),
+                                                      value: 'color',
+                                                      child: const Text(
+                                                        'Color row',
+                                                      ),
                                                     ),
-                                                padding: EdgeInsets.zero,
-                                                icon: const Icon(
-                                                  Icons.arrow_upward,
-                                                  size: 16,
-                                                ),
-                                                onPressed:
-                                                    index == 0 ||
-                                                            saving ||
-                                                            !canRearrangeRows
-                                                        ? null
-                                                        : () =>
-                                                            _moveRow(index, -1),
-                                              ),
-                                              IconButton(
-                                                tooltip: 'Move row down',
-                                                constraints:
-                                                    const BoxConstraints(
-                                                      minWidth: 26,
-                                                      minHeight: 28,
+                                                    PopupMenuItem(
+                                                      key: ValueKey(
+                                                        'row-action-notification-${row.id}',
+                                                      ),
+                                                      value: 'notify',
+                                                      child: Text(
+                                                        row.notifyAt == null
+                                                            ? 'Set notification'
+                                                            : 'Edit notification',
+                                                      ),
                                                     ),
-                                                padding: EdgeInsets.zero,
-                                                icon: const Icon(
-                                                  Icons.arrow_downward,
-                                                  size: 16,
-                                                ),
-                                                onPressed:
-                                                    index ==
-                                                                visible.length -
-                                                                    1 ||
-                                                            saving ||
-                                                            !canRearrangeRows
-                                                        ? null
-                                                        : () =>
-                                                            _moveRow(index, 1),
-                                              ),
-                                            ],
-                                            if (!rearranging)
-                                              PopupMenuButton<String>(
-                                                tooltip:
-                                                    'Row ${index + 1} actions',
-                                                icon: Icon(
-                                                  Icons.more_vert,
-                                                  color:
-                                                      row.notifyAt == null
-                                                          ? scheme
-                                                              .onSurfaceVariant
-                                                          : scheme.primary,
-                                                ),
-                                                padding: EdgeInsets.zero,
-                                                onSelected: (action) {
-                                                  _selectRowForAction(row);
-                                                  switch (action) {
-                                                    case 'color':
-                                                      _colorRow();
-                                                    case 'notify':
-                                                      _setReminder();
-                                                    case 'clear-notification':
-                                                      _clearReminder();
-                                                    case 'duplicate':
-                                                      _duplicateRow();
-                                                    case 'delete':
-                                                      _deleteRow();
-                                                  }
-                                                },
-                                                itemBuilder:
-                                                    (_) => [
-                                                      PopupMenuItem(
-                                                        key: ValueKey(
-                                                          'row-action-color-${row.id}',
-                                                        ),
-                                                        value: 'color',
-                                                        child: const Text(
-                                                          'Color row',
-                                                        ),
-                                                      ),
-                                                      PopupMenuItem(
-                                                        key: ValueKey(
-                                                          'row-action-notification-${row.id}',
-                                                        ),
-                                                        value: 'notify',
-                                                        child: Text(
-                                                          row.notifyAt == null
-                                                              ? 'Set notification'
-                                                              : 'Edit notification',
-                                                        ),
-                                                      ),
-                                                      if (row.notifyAt != null)
-                                                        const PopupMenuItem(
-                                                          value:
-                                                              'clear-notification',
-                                                          child: Text(
-                                                            'Clear notification',
-                                                          ),
-                                                        ),
-                                                      const PopupMenuDivider(),
+                                                    if (row.notifyAt != null)
                                                       const PopupMenuItem(
-                                                        value: 'duplicate',
+                                                        value:
+                                                            'clear-notification',
                                                         child: Text(
-                                                          'Duplicate row',
+                                                          'Clear notification',
                                                         ),
                                                       ),
-                                                      const PopupMenuItem(
-                                                        value: 'delete',
-                                                        child: Text(
-                                                          'Delete row',
-                                                        ),
+                                                    const PopupMenuDivider(),
+                                                    const PopupMenuItem(
+                                                      value: 'duplicate',
+                                                      child: Text(
+                                                        'Duplicate row',
                                                       ),
-                                                    ],
-                                              ),
+                                                    ),
+                                                    const PopupMenuItem(
+                                                      value: 'print',
+                                                      child: Text('Print row'),
+                                                    ),
+                                                    const PopupMenuItem(
+                                                      value: 'delete',
+                                                      child: Text('Delete row'),
+                                                    ),
+                                                  ],
+                                            ),
                                           ],
                                         ),
                                       ),
@@ -1702,10 +1629,8 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                           'table-cell-${row.id}-${column.id}',
                                         ),
                                         onTap: () {
-                                          if (rearranging ||
-                                              (editingRowId == row.id &&
-                                                  editingColumnId ==
-                                                      column.id)) {
+                                          if (editingRowId == row.id &&
+                                              editingColumnId == column.id) {
                                             return;
                                           }
                                           _startInlineEdit(row, column);
@@ -1798,8 +1723,6 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                                               (_, event) =>
                                                                   _handleCellKey(
                                                                     event,
-                                                                    row,
-                                                                    column,
                                                                   ),
                                                           child: TextField(
                                                             key: const ValueKey(
@@ -1809,13 +1732,15 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                                                 cellEditor,
                                                             focusNode:
                                                                 cellFocus,
-                                                            maxLines: 1,
+                                                            minLines: 1,
+                                                            maxLines:
+                                                                inlineCellMaxLines,
                                                             keyboardType:
                                                                 TextInputType
-                                                                    .text,
+                                                                    .multiline,
                                                             textInputAction:
                                                                 TextInputAction
-                                                                    .done,
+                                                                    .newline,
                                                             textAlignVertical:
                                                                 TextAlignVertical
                                                                     .top,
@@ -1847,12 +1772,10 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                                                       EdgeInsets
                                                                           .zero,
                                                                 ),
-                                                            onSubmitted:
-                                                                (_) =>
-                                                                    _commitInlineEdit(
-                                                                      row,
-                                                                      column,
-                                                                    ),
+                                                            onChanged:
+                                                                (_) => setState(
+                                                                  () {},
+                                                                ),
                                                           ),
                                                         ),
                                                       ),
@@ -1898,13 +1821,12 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                                     message:
                                                         row.cells[column.id] ??
                                                         '',
-                                                    child: Text(
-                                                      row.cells[column.id] ??
+                                                    child: TableValueDisplay(
+                                                      fieldKey: column.label,
+                                                      value:
+                                                          row.cells[column
+                                                              .id] ??
                                                           '',
-                                                      maxLines: 1,
-                                                      softWrap: false,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
                                                       style:
                                                           Theme.of(context)
                                                               .textTheme
@@ -1963,6 +1885,8 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
       return const Center(child: CircularProgressIndicator());
     }
     final visible = _visibleRows(current);
+    final window = tablePageWindow(visible.length, _page, _pageSize);
+    final pageRows = visible.sublist(window.start, window.end);
     return Column(
       children: [
         ConstrainedBox(
@@ -1971,8 +1895,42 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
           ),
           child: SingleChildScrollView(child: _toolbar(current, visible)),
         ),
-        const Divider(height: 1),
-        Expanded(child: _grid(current, visible)),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            child: Container(
+              decoration: tablePanelDecoration(context),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Column(
+                  children: [
+                    Expanded(child: _grid(current, pageRows, window.start)),
+                    TablePagination(
+                      total: visible.length,
+                      page: window.page,
+                      pageSize: _pageSize,
+                      onPageChanged: (page) {
+                        _finishInlineEdit();
+                        setState(() {
+                          _page = page;
+                          if (vertical.hasClients) vertical.jumpTo(0);
+                        });
+                      },
+                      onPageSizeChanged: (size) {
+                        _finishInlineEdit();
+                        setState(() {
+                          _page = 0;
+                          _pageSize = size;
+                          if (vertical.hasClients) vertical.jumpTo(0);
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
