@@ -85,7 +85,13 @@ void main() {
     expect(api.rows.single['assetName'], 'Laptop');
 
     await tester.tap(find.text('Laptop').first);
-    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('module-cell-editor')), findsNothing);
+    await tester.tap(find.text('Laptop').first);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('Laptop').first);
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.enterText(
       find.byKey(const ValueKey('module-cell-editor')),
       'Phone',

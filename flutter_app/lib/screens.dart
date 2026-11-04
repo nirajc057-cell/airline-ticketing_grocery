@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'api.dart';
 import 'booking_form_fields.dart';
+import 'demo_sales_preview.dart';
+import 'financial_register.dart';
 import 'inline_cell_layout.dart';
 import 'record_print.dart';
 import 'table_view_ui.dart';
@@ -45,6 +48,7 @@ class ModuleScreen extends StatefulWidget {
 class _ModuleScreenState extends State<ModuleScreen> {
   late Future<dynamic> future = widget.api.get(widget.module.path);
   Future<List<dynamic>>? groceryReportsFuture;
+  bool _showDemoFinancialPreview = kDebugMode;
   Future<dynamic>? recentBookingsFuture;
   String search = '';
   String status = '';
@@ -59,7 +63,36 @@ class _ModuleScreenState extends State<ModuleScreen> {
   final _cellEditor = TextEditingController();
   final _tableHorizontal = ScrollController();
   final _tableVertical = ScrollController();
+  final _tableActionsVertical = ScrollController();
   Timer? _searchDebounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _tableVertical.addListener(_syncActionsToTable);
+    _tableActionsVertical.addListener(_syncTableToActions);
+  }
+
+  void _syncActionsToTable() =>
+      _syncTableVerticalScroll(_tableVertical, _tableActionsVertical);
+
+  void _syncTableToActions() =>
+      _syncTableVerticalScroll(_tableActionsVertical, _tableVertical);
+
+  void _syncTableVerticalScroll(
+    ScrollController source,
+    ScrollController target,
+  ) {
+    if (!source.hasClients || !target.hasClients) return;
+    final offset =
+        source.offset
+            .clamp(
+              target.position.minScrollExtent,
+              target.position.maxScrollExtent,
+            )
+            .toDouble();
+    if ((target.offset - offset).abs() > 0.5) target.jumpTo(offset);
+  }
 
   @override
   void dispose() {
@@ -67,6 +100,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
     _cellEditor.dispose();
     _tableHorizontal.dispose();
     _tableVertical.dispose();
+    _tableActionsVertical.dispose();
     _searchDebounce?.cancel();
     super.dispose();
   }
@@ -1083,6 +1117,8 @@ class _ModuleScreenState extends State<ModuleScreen> {
             style: Theme.of(context).textTheme.headlineSmall,
           ),
           const SizedBox(height: 12),
+          const Text('Recorded store counts'),
+          const SizedBox(height: 8),
           _metricStrip([
             for (final entry in asMap(data['stats']).entries)
               _metric(_label(entry.key), displayValue(entry.value)),
@@ -1096,17 +1132,41 @@ class _ModuleScreenState extends State<ModuleScreen> {
                     ? Text(snapshot.error.toString())
                     : const Center(child: CircularProgressIndicator());
               }
-              final sales = asRows(snapshot.data![0]);
+              final recordedSales = asRows(snapshot.data![0]);
               final products = asRows(snapshot.data![1]);
-              final expenses = asRows(snapshot.data![2]);
+              final recordedExpenses = asRows(snapshot.data![2]);
+              final previewAvailable =
+                  recordedSales.isEmpty && recordedExpenses.isEmpty;
+              final previewActive =
+                  previewAvailable && _showDemoFinancialPreview;
+              final sales = previewActive ? demoGrocerySales : recordedSales;
+              final expenses =
+                  previewActive ? demoGroceryExpenses : recordedExpenses;
               double sum(List<Map<String, dynamic>> rows, String key) =>
                   rows.fold(
                     0,
                     (total, row) =>
                         total + ((row[key] as num?)?.toDouble() ?? 0),
                   );
+              final expensesKnown = expenses.every(
+                (row) => row['total'] is num || row['amount'] is num,
+              );
+              final salesTotalKnown = sales.every((row) => row['total'] is num);
+              final profitKnown = sales.every((row) => row['profit'] is num);
+              final stockCostKnown = products.every(
+                (row) => row['cost'] is num && row['stock'] is num,
+              );
+              final stockRetailKnown = products.every(
+                (row) => row['price'] is num && row['stock'] is num,
+              );
               final grossProfit = sum(sales, 'profit');
-              final expenseTotal = sum(expenses, 'amount');
+              final expenseTotal = expenses.fold<double>(
+                0,
+                (total, row) =>
+                    total +
+                    (((row['total'] ?? row['amount']) as num?)?.toDouble() ??
+                        0),
+              );
               final stockCost = products.fold<double>(
                 0,
                 (total, row) =>
@@ -1124,21 +1184,67 @@ class _ModuleScreenState extends State<ModuleScreen> {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (previewAvailable) ...[
+                    _demoFinancialControl('sales and expenses'),
+                    const SizedBox(height: 16),
+                  ],
                   _metricStrip([
+                    _metric('Sales count', '${sales.length}'),
                     _metric(
                       'Total sales',
-                      sum(sales, 'total').toStringAsFixed(2),
+                      salesTotalKnown
+                          ? sum(sales, 'total').toStringAsFixed(2)
+                          : 'Not available',
                     ),
-                    _metric('Gross profit', grossProfit.toStringAsFixed(2)),
+                    _metric(
+                      'Gross profit',
+                      profitKnown
+                          ? grossProfit.toStringAsFixed(2)
+                          : 'Not available',
+                    ),
+                    _metric(
+                      'Expenses',
+                      expensesKnown
+                          ? expenseTotal.toStringAsFixed(2)
+                          : 'Not available',
+                    ),
                     _metric(
                       'Net after expenses',
-                      (grossProfit - expenseTotal).toStringAsFixed(2),
+                      profitKnown && expensesKnown
+                          ? (grossProfit - expenseTotal).toStringAsFixed(2)
+                          : 'Not available',
                     ),
-                    _metric('Stock at cost', stockCost.toStringAsFixed(2)),
-                    _metric('Stock at retail', stockRetail.toStringAsFixed(2)),
+                    _metric(
+                      'Stock at cost',
+                      stockCostKnown
+                          ? stockCost.toStringAsFixed(2)
+                          : 'Not available',
+                    ),
+                    _metric(
+                      'Stock at retail',
+                      stockRetailKnown
+                          ? stockRetail.toStringAsFixed(2)
+                          : 'Not available',
+                    ),
                   ]),
                   const SizedBox(height: 16),
-                  _section('Sales register', sales),
+                  FinancialRegister(
+                    title: 'Sales register',
+                    rows: sales,
+                    kind: FinancialRecordKind.grocerySale,
+                    demo: previewActive,
+                    onOpenRecord: _detail,
+                    onPrintRecord: _printRecord,
+                  ),
+                  const SizedBox(height: 20),
+                  FinancialRegister(
+                    title: 'Expenses',
+                    rows: expenses,
+                    kind: FinancialRecordKind.expense,
+                    demo: previewActive,
+                    onOpenRecord: _detail,
+                    onPrintRecord: _printRecord,
+                  ),
                 ],
               );
             },
@@ -1146,9 +1252,37 @@ class _ModuleScreenState extends State<ModuleScreen> {
         ],
       );
     }
-    final totals = asMap(data['totals']);
+    final recordedSales =
+        data.containsKey('rows') ? asRows(data['rows']) : asRows(data['sales']);
+    final previewAvailable =
+        recordedSales.isEmpty && (data['count'] == null || data['count'] == 0);
+    final previewActive = previewAvailable && _showDemoFinancialPreview;
+    final sales = previewActive ? demoAirlineSales : recordedSales;
+    final totalFromRows =
+        sales.every((row) => row['total'] is num)
+            ? sales.fold<double>(
+              0,
+              (total, row) => total + (row['total'] as num).toDouble(),
+            )
+            : null;
+    final totals =
+        previewActive
+            ? <String, dynamic>{
+              'salesCount': sales.length,
+              'totalSales': totalFromRows ?? 0,
+            }
+            : <String, dynamic>{
+              'salesCount': data['count'] ?? sales.length,
+              'totalSales':
+                  data['totalSales'] ?? totalFromRows ?? 'Not available',
+              ...asMap(data['totals']),
+            };
     return _page(
       ux: [
+        if (previewAvailable) ...[
+          _demoFinancialControl('sales'),
+          const SizedBox(height: 16),
+        ],
         Wrap(
           spacing: 12,
           runSpacing: 12,
@@ -1161,20 +1295,41 @@ class _ModuleScreenState extends State<ModuleScreen> {
                   .toList(),
         ),
         const SizedBox(height: 16),
-        _section('Sales', asRows(data['rows'])),
+        FinancialRegister(
+          title: 'Sales',
+          rows: sales,
+          kind: FinancialRecordKind.airlineSale,
+          demo: previewActive,
+          onOpenRecord: _detail,
+          onPrintRecord: _printRecord,
+        ),
       ],
     );
   }
 
   Widget _collection(List<Map<String, dynamic>> rows) {
+    final previewAvailable =
+        (widget.module.key == 'sales' ||
+            (widget.grocery && widget.module.key == 'expenses')) &&
+        rows.isEmpty &&
+        search.trim().isEmpty;
+    final previewActive = previewAvailable && _showDemoFinancialPreview;
+    final visibleRows =
+        previewActive
+            ? widget.grocery
+                ? widget.module.key == 'expenses'
+                    ? demoGroceryExpenses
+                    : demoGrocerySales
+                : demoAirlineSales
+            : rows;
     final statuses = <String>{};
-    for (final row in rows) {
+    for (final row in visibleRows) {
       final value = row['status']?.toString();
       if (value != null && value.isNotEmpty) statuses.add(value);
     }
     final selectedStatus = statuses.contains(status) ? status : '';
     final filtered =
-        rows.where((row) {
+        visibleRows.where((row) {
           final query = search.toLowerCase();
           return (selectedStatus.isEmpty || row['status'] == selectedStatus) &&
               row.values.any(
@@ -1182,10 +1337,22 @@ class _ModuleScreenState extends State<ModuleScreen> {
               );
         }).toList();
     if (!widget.grocery) {
-      return _travelCollection(filtered, statuses, selectedStatus);
+      return _travelCollection(
+        filtered,
+        statuses,
+        selectedStatus,
+        showDemoSalesControl: previewAvailable,
+        demo: previewActive,
+      );
     }
     return _page(
       ux: [
+        if (previewAvailable) ...[
+          _demoFinancialControl(
+            widget.module.key == 'expenses' ? 'expenses' : 'sales',
+          ),
+          const SizedBox(height: 16),
+        ],
         Wrap(
           alignment: WrapAlignment.spaceBetween,
           crossAxisAlignment: WrapCrossAlignment.center,
@@ -1221,7 +1388,23 @@ class _ModuleScreenState extends State<ModuleScreen> {
               widget.module.key == 'roles',
         ),
         const SizedBox(height: 14),
-        _recordTable(filtered),
+        if (widget.module.key == 'sales' || widget.module.key == 'expenses')
+          FinancialRegister(
+            title:
+                widget.module.key == 'sales'
+                    ? 'Sales register'
+                    : 'Expense register',
+            rows: filtered,
+            kind:
+                widget.module.key == 'sales'
+                    ? FinancialRecordKind.grocerySale
+                    : FinancialRecordKind.expense,
+            demo: previewActive,
+            onOpenRecord: _detail,
+            onPrintRecord: _printRecord,
+          )
+        else
+          _recordTable(filtered),
       ],
     );
   }
@@ -1229,8 +1412,10 @@ class _ModuleScreenState extends State<ModuleScreen> {
   Widget _travelCollection(
     List<Map<String, dynamic>> filtered,
     Set<String> statuses,
-    String selectedStatus,
-  ) {
+    String selectedStatus, {
+    bool showDemoSalesControl = false,
+    bool demo = false,
+  }) {
     final canCreate =
         widget.module.fields.isNotEmpty ||
         widget.module.key == 'purchases' ||
@@ -1238,6 +1423,10 @@ class _ModuleScreenState extends State<ModuleScreen> {
         widget.module.key == 'sales';
     return _page(
       ux: [
+        if (showDemoSalesControl) ...[
+          _demoFinancialControl('sales'),
+          const SizedBox(height: 16),
+        ],
         LayoutBuilder(
           builder:
               (context, constraints) => Wrap(
@@ -1284,10 +1473,59 @@ class _ModuleScreenState extends State<ModuleScreen> {
         const SizedBox(height: 20),
         _collectionToolbar(statuses, selectedStatus, canCreate: canCreate),
         const SizedBox(height: 16),
-        _recordTable(filtered),
+        if (widget.module.key == 'sales')
+          FinancialRegister(
+            title: 'Sales register',
+            rows: filtered,
+            kind: FinancialRecordKind.airlineSale,
+            demo: demo,
+            onOpenRecord: _detail,
+            onPrintRecord: _printRecord,
+          )
+        else
+          _recordTable(filtered),
       ],
     );
   }
+
+  Widget _demoFinancialControl(String kind) => Card(
+    color: const Color(0xfffff4d9),
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _showDemoFinancialPreview
+                ? 'DEMO PREVIEW — sample $kind, not real transactions'
+                : 'No $kind recorded yet',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _showDemoFinancialPreview
+                ? 'These examples are not saved to the database and do not change balances or accounting records.'
+                : 'Preview example $kind to see how this screen will look. No sample data will be saved.',
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed:
+                  () => setState(() {
+                    _showDemoFinancialPreview = !_showDemoFinancialPreview;
+                    _tablePage = 0;
+                  }),
+              child: Text(
+                _showDemoFinancialPreview
+                    ? 'Hide sample data'
+                    : 'Preview sample $kind',
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 
   Widget _collectionToolbar(
     Set<String> statuses,
@@ -1555,7 +1793,11 @@ class _ModuleScreenState extends State<ModuleScreen> {
     }
   }
 
-  Widget _tableCell(Map<String, dynamic> row, FieldSpec field) {
+  Widget _tableCell(
+    Map<String, dynamic> row,
+    FieldSpec field,
+    double columnWidth,
+  ) {
     final value = displayValue(row[field.key]);
     final choices =
         field.type == FieldType.toggle
@@ -1568,7 +1810,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
         field.type == FieldType.text || field.type == FieldType.paragraph;
     return SizedBox(
       key: ValueKey('module-cell-${row['id']}-${field.key}'),
-      width: 210,
+      width: columnWidth,
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 48, maxHeight: 180),
         child:
@@ -1673,7 +1915,7 @@ class _ModuleScreenState extends State<ModuleScreen> {
                   ],
                 )
                 : InkWell(
-                  onTap:
+                  onDoubleTap:
                       _canEditTableField(field)
                           ? () => setState(() {
                             _editingRecordId = row['id']?.toString();
@@ -1697,7 +1939,24 @@ class _ModuleScreenState extends State<ModuleScreen> {
     );
   }
 
-  double _recordRowHeight(Map<String, dynamic> row, List<FieldSpec> fields) {
+  double _recordColumnWidth(FieldSpec field, bool structured) {
+    final minimum =
+        structured
+            ? 400.0
+            : field.type == FieldType.paragraph
+            ? 300.0
+            : 210.0;
+    final labelWidth = field.label.length * 8.0 + 24;
+    return (labelWidth > minimum ? labelWidth : minimum)
+        .clamp(210.0, 420.0)
+        .toDouble();
+  }
+
+  double _recordRowHeight(
+    Map<String, dynamic> row,
+    List<FieldSpec> fields,
+    Map<String, double> columnWidths,
+  ) {
     final style =
         Theme.of(context).textTheme.bodyMedium ?? const TextStyle(fontSize: 14);
     final direction = Directionality.of(context);
@@ -1707,10 +1966,10 @@ class _ModuleScreenState extends State<ModuleScreen> {
           _editingRecordId == row['id']?.toString() &&
           _editingFieldKey == field.key;
       final value = editing ? _cellEditor.text : displayValue(row[field.key]);
-      if (!editing && !value.contains('\n')) continue;
+      final width = columnWidths[field.key] ?? 210;
       final count = inlineCellLineCount(
         value,
-        width: editing ? 125 : 195,
+        width: editing ? width - 85 : width - 16,
         style: style,
         direction: direction,
       );
@@ -1757,13 +2016,30 @@ class _ModuleScreenState extends State<ModuleScreen> {
           _tablePageSize,
         );
         final pageRows = orderedRows.sublist(window.start, window.end);
+        final structuredKeys = <String>{};
+        for (final row in orderedRows) {
+          for (final entry in row.entries) {
+            if (entry.value is Map || entry.value is List) {
+              structuredKeys.add(entry.key);
+            }
+          }
+        }
+        final columnWidths = <String, double>{
+          for (final field in fields)
+            field.key: _recordColumnWidth(
+              field,
+              structuredKeys.contains(field.key),
+            ),
+        };
+        final rowHeights = [
+          for (final row in pageRows)
+            _recordRowHeight(row, fields, columnWidths),
+        ];
         final tableHeight =
-            48 +
-            pageRows.fold<double>(
-              0,
-              (height, row) => height + _recordRowHeight(row, fields),
-            );
-        final contentWidth = 58.0 + fields.length * 210.0 + 52.0;
+            48 + rowHeights.fold<double>(0, (height, row) => height + row);
+        final contentWidth =
+            58.0 +
+            columnWidths.values.fold<double>(0, (sum, width) => sum + width);
         final scheme = Theme.of(context).colorScheme;
         return Container(
           decoration: tablePanelDecoration(context),
@@ -1773,209 +2049,293 @@ class _ModuleScreenState extends State<ModuleScreen> {
               children: [
                 SizedBox(
                   height: tableHeight.clamp(120.0, 560.0),
-                  child: LayoutBuilder(
-                    builder:
-                        (context, constraints) => Scrollbar(
-                          controller: _tableHorizontal,
-                          thumbVisibility: true,
-                          notificationPredicate:
-                              (notification) =>
-                                  notification.metrics.axis == Axis.horizontal,
-                          child: SingleChildScrollView(
-                            controller: _tableHorizontal,
-                            scrollDirection: Axis.horizontal,
-                            child: SizedBox(
-                              width:
-                                  contentWidth < constraints.maxWidth
-                                      ? constraints.maxWidth
-                                      : contentWidth,
-                              child: Column(
-                                children: [
-                                  Container(
-                                    height: 48,
-                                    decoration: BoxDecoration(
-                                      color: tableHeaderColor(context),
-                                      border: Border(
-                                        bottom: BorderSide(
-                                          color: scheme.outlineVariant,
-                                        ),
-                                      ),
-                                    ),
-                                    child: Row(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: LayoutBuilder(
+                          builder:
+                              (context, constraints) => Scrollbar(
+                                controller: _tableHorizontal,
+                                thumbVisibility: true,
+                                notificationPredicate:
+                                    (notification) =>
+                                        notification.metrics.axis ==
+                                        Axis.horizontal,
+                                child: SingleChildScrollView(
+                                  key: const ValueKey(
+                                    'record-table-horizontal-scroll',
+                                  ),
+                                  controller: _tableHorizontal,
+                                  scrollDirection: Axis.horizontal,
+                                  child: SizedBox(
+                                    width:
+                                        contentWidth < constraints.maxWidth
+                                            ? constraints.maxWidth
+                                            : contentWidth,
+                                    child: Column(
                                       children: [
-                                        SizedBox(
-                                          width: 58,
-                                          child: Center(
-                                            child: Text(
-                                              '#',
-                                              style: tableHeaderStyle(context),
+                                        Container(
+                                          height: 48,
+                                          decoration: BoxDecoration(
+                                            color: tableHeaderColor(context),
+                                            border: Border(
+                                              bottom: BorderSide(
+                                                color: scheme.outlineVariant,
+                                              ),
                                             ),
                                           ),
-                                        ),
-                                        for (final field in fields)
-                                          SizedBox(
-                                            width: 210,
-                                            child: InkWell(
-                                              onTap:
-                                                  () => setState(() {
-                                                    if (_tableSortKey ==
-                                                        field.key) {
-                                                      _tableSortAscending =
-                                                          !_tableSortAscending;
-                                                    } else {
-                                                      _tableSortKey = field.key;
-                                                      _tableSortAscending =
-                                                          true;
-                                                    }
-                                                    _tablePage = 0;
-                                                  }),
-                                              child: Padding(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 8,
-                                                    ),
-                                                child: Align(
-                                                  alignment:
-                                                      Alignment.centerLeft,
+                                          child: Row(
+                                            children: [
+                                              SizedBox(
+                                                width: 58,
+                                                child: Center(
                                                   child: Text(
-                                                    field.label.toUpperCase(),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
+                                                    '#',
                                                     style: tableHeaderStyle(
                                                       context,
                                                     ),
                                                   ),
                                                 ),
                                               ),
-                                            ),
-                                          ),
-                                        const SizedBox(width: 52),
-                                        const Spacer(),
-                                      ],
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child:
-                                        pageRows.isEmpty
-                                            ? Center(
-                                              child: Text(
-                                                'No matching records',
-                                                style: TextStyle(
-                                                  color:
-                                                      scheme.onSurfaceVariant,
-                                                ),
-                                              ),
-                                            )
-                                            : Scrollbar(
-                                              controller: _tableVertical,
-                                              thumbVisibility: true,
-                                              child: ListView.builder(
-                                                key: const ValueKey(
-                                                  'record-table',
-                                                ),
-                                                controller: _tableVertical,
-                                                itemCount: pageRows.length,
-                                                itemExtentBuilder:
-                                                    (index, _) =>
-                                                        index < pageRows.length
-                                                            ? _recordRowHeight(
-                                                              pageRows[index],
-                                                              fields,
-                                                            )
-                                                            : null,
-                                                itemBuilder: (context, index) {
-                                                  final row = pageRows[index];
-                                                  final height =
-                                                      _recordRowHeight(
-                                                        row,
-                                                        fields,
-                                                      );
-                                                  return Container(
-                                                    height: height,
-                                                    decoration: BoxDecoration(
-                                                      color:
-                                                          index.isEven
-                                                              ? scheme.surface
-                                                              : scheme
-                                                                  .surfaceContainerLowest,
-                                                      border: Border(
-                                                        bottom: BorderSide(
-                                                          color: scheme
-                                                              .outlineVariant
-                                                              .withValues(
-                                                                alpha: .65,
+                                              for (final field in fields)
+                                                SizedBox(
+                                                  width:
+                                                      columnWidths[field.key],
+                                                  child: InkWell(
+                                                    onTap:
+                                                        () => setState(() {
+                                                          if (_tableSortKey ==
+                                                              field.key) {
+                                                            _tableSortAscending =
+                                                                !_tableSortAscending;
+                                                          } else {
+                                                            _tableSortKey =
+                                                                field.key;
+                                                            _tableSortAscending =
+                                                                true;
+                                                          }
+                                                          _tablePage = 0;
+                                                        }),
+                                                    child: Padding(
+                                                      padding:
+                                                          const EdgeInsets.symmetric(
+                                                            horizontal: 8,
+                                                          ),
+                                                      child: Align(
+                                                        alignment:
+                                                            Alignment
+                                                                .centerLeft,
+                                                        child: Text(
+                                                          field.label
+                                                              .toUpperCase(),
+                                                          maxLines: 1,
+                                                          overflow:
+                                                              TextOverflow
+                                                                  .ellipsis,
+                                                          style:
+                                                              tableHeaderStyle(
+                                                                context,
                                                               ),
                                                         ),
                                                       ),
                                                     ),
-                                                    child: Row(
-                                                      children: [
-                                                        SizedBox(
-                                                          width: 58,
-                                                          child: Center(
-                                                            child: Text(
-                                                              '${window.start + index + 1}',
-                                                              style: TextStyle(
-                                                                color:
-                                                                    scheme
-                                                                        .onSurfaceVariant,
-                                                                fontSize: 12,
+                                                  ),
+                                                ),
+                                              const Spacer(),
+                                            ],
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child:
+                                              pageRows.isEmpty
+                                                  ? Center(
+                                                    child: Text(
+                                                      'No matching records',
+                                                      style: TextStyle(
+                                                        color:
+                                                            scheme
+                                                                .onSurfaceVariant,
+                                                      ),
+                                                    ),
+                                                  )
+                                                  : Scrollbar(
+                                                    controller: _tableVertical,
+                                                    thumbVisibility: true,
+                                                    child: ListView.builder(
+                                                      key: const ValueKey(
+                                                        'record-table',
+                                                      ),
+                                                      controller:
+                                                          _tableVertical,
+                                                      itemCount:
+                                                          pageRows.length,
+                                                      itemExtentBuilder:
+                                                          (index, _) =>
+                                                              index <
+                                                                      pageRows
+                                                                          .length
+                                                                  ? rowHeights[index]
+                                                                  : null,
+                                                      itemBuilder: (
+                                                        context,
+                                                        index,
+                                                      ) {
+                                                        final row =
+                                                            pageRows[index];
+                                                        final height =
+                                                            rowHeights[index];
+                                                        return Container(
+                                                          key: ValueKey(
+                                                            'record-data-row-$index',
+                                                          ),
+                                                          height: height,
+                                                          decoration: BoxDecoration(
+                                                            color:
+                                                                index.isEven
+                                                                    ? scheme
+                                                                        .surface
+                                                                    : scheme
+                                                                        .surfaceContainerLowest,
+                                                            border: Border(
+                                                              bottom: BorderSide(
+                                                                color: scheme
+                                                                    .outlineVariant
+                                                                    .withValues(
+                                                                      alpha:
+                                                                          .65,
+                                                                    ),
                                                               ),
                                                             ),
                                                           ),
-                                                        ),
-                                                        for (final field
-                                                            in fields)
-                                                          _tableCell(
-                                                            row,
-                                                            field,
-                                                          ),
-                                                        SizedBox(
-                                                          width: 52,
-                                                          child:
-                                                              widget.module.key ==
-                                                                      'company_assets'
-                                                                  ? IconButton(
-                                                                    tooltip:
-                                                                        'Delete row',
-                                                                    icon: const Icon(
-                                                                      Icons
-                                                                          .delete_outline,
-                                                                      size: 18,
+                                                          child: Row(
+                                                            children: [
+                                                              SizedBox(
+                                                                width: 58,
+                                                                child: Center(
+                                                                  child: Text(
+                                                                    '${window.start + index + 1}',
+                                                                    style: TextStyle(
+                                                                      color:
+                                                                          scheme
+                                                                              .onSurfaceVariant,
+                                                                      fontSize:
+                                                                          12,
                                                                     ),
-                                                                    onPressed:
-                                                                        () => _deleteCompanyAsset(
-                                                                          row,
-                                                                        ),
-                                                                  )
-                                                                  : IconButton(
-                                                                    tooltip:
-                                                                        'Details',
-                                                                    icon: const Icon(
-                                                                      Icons
-                                                                          .chevron_right,
-                                                                      size: 18,
-                                                                    ),
-                                                                    onPressed:
-                                                                        () => _detail(
-                                                                          row,
-                                                                        ),
                                                                   ),
-                                                        ),
-                                                        const Spacer(),
-                                                      ],
+                                                                ),
+                                                              ),
+                                                              for (final field
+                                                                  in fields)
+                                                                _tableCell(
+                                                                  row,
+                                                                  field,
+                                                                  columnWidths[field
+                                                                      .key]!,
+                                                                ),
+                                                              const Spacer(),
+                                                            ],
+                                                          ),
+                                                        );
+                                                      },
                                                     ),
-                                                  );
-                                                },
-                                              ),
-                                            ),
+                                                  ),
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                ],
+                                ),
                               ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 52,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            border: Border(
+                              left: BorderSide(color: scheme.outlineVariant),
                             ),
                           ),
+                          child: Column(
+                            children: [
+                              Container(
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: tableHeaderColor(context),
+                                  border: Border(
+                                    bottom: BorderSide(
+                                      color: scheme.outlineVariant,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child:
+                                    pageRows.isEmpty
+                                        ? const SizedBox.shrink()
+                                        : ListView.builder(
+                                          key: const ValueKey('record-actions'),
+                                          controller: _tableActionsVertical,
+                                          itemCount: pageRows.length,
+                                          itemExtentBuilder:
+                                              (index, _) =>
+                                                  index < pageRows.length
+                                                      ? rowHeights[index]
+                                                      : null,
+                                          itemBuilder: (context, index) {
+                                            final row = pageRows[index];
+                                            return Container(
+                                              decoration: BoxDecoration(
+                                                color:
+                                                    index.isEven
+                                                        ? scheme.surface
+                                                        : scheme
+                                                            .surfaceContainerLowest,
+                                                border: Border(
+                                                  bottom: BorderSide(
+                                                    color: scheme.outlineVariant
+                                                        .withValues(alpha: .65),
+                                                  ),
+                                                ),
+                                              ),
+                                              child:
+                                                  widget.module.key ==
+                                                          'company_assets'
+                                                      ? IconButton(
+                                                        key: ValueKey(
+                                                          'record-action-$index',
+                                                        ),
+                                                        tooltip: 'Delete row',
+                                                        icon: const Icon(
+                                                          Icons.delete_outline,
+                                                          size: 18,
+                                                        ),
+                                                        onPressed:
+                                                            () =>
+                                                                _deleteCompanyAsset(
+                                                                  row,
+                                                                ),
+                                                      )
+                                                      : IconButton(
+                                                        key: ValueKey(
+                                                          'record-action-$index',
+                                                        ),
+                                                        tooltip: 'Details',
+                                                        icon: const Icon(
+                                                          Icons.chevron_right,
+                                                          size: 18,
+                                                        ),
+                                                        onPressed:
+                                                            () => _detail(row),
+                                                      ),
+                                            );
+                                          },
+                                        ),
+                              ),
+                            ],
+                          ),
                         ),
+                      ),
+                    ],
                   ),
                 ),
                 TablePagination(
@@ -2074,7 +2434,12 @@ class _ModuleScreenState extends State<ModuleScreen> {
 
   Future<void> _printRecord(Map<String, dynamic> row) async {
     try {
-      if (widget.grocery && widget.module.key == 'sales') {
+      if (row['id']?.toString().startsWith('DEMO-') == true) {
+        widget.message('Sample records cannot be printed');
+        return;
+      }
+      if (widget.grocery &&
+          (widget.module.key == 'sales' || row.containsKey('receipt'))) {
         await printRecord(freshMartSaleReceiptData(row));
         return;
       }
@@ -2084,6 +2449,10 @@ class _ModuleScreenState extends State<ModuleScreen> {
           title:
               widget.module.key == 'bookings'
                   ? 'Booking summary'
+                  : row.containsKey('payee')
+                  ? 'Expense voucher'
+                  : widget.module.key == 'sales' || row.containsKey('payments')
+                  ? 'Sale receipt'
                   : '${widget.module.title} record',
           reference: displayValue(row['id'] ?? row['reference'] ?? row['name']),
           fields: [

@@ -266,13 +266,12 @@ class TableScreenState extends State<TableScreen> {
 
   void _select(SpreadsheetRow row, TableColumnDef column) {
     if (editingRow == row && editingKey == column.key) return;
-    if (column.editable) {
-      _startInlineEdit(row, column);
-      return;
-    }
+    cellFocus.unfocus();
     setState(() {
       selectedRow = row;
       selectedKey = column.key;
+      editingRow = null;
+      editingKey = null;
     });
   }
 
@@ -961,6 +960,7 @@ class TableScreenState extends State<TableScreen> {
 
   Widget _rowCell(SpreadsheetRow row, TableColumnDef column, double rowHeight) {
     final selected = selectedRow == row && selectedKey == column.key;
+    final editing = editingRow == row && editingKey == column.key;
     final value = row.values[column.key]?.toString() ?? '';
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
@@ -969,6 +969,10 @@ class TableScreenState extends State<TableScreen> {
       child: InkWell(
         key: ValueKey('spreadsheet-cell-${row.id}-${column.key}'),
         onTap: () => _select(row, column),
+        onDoubleTap:
+            column.editable && !editing
+                ? () => _startInlineEdit(row, column)
+                : null,
         child: Container(
           alignment: Alignment.centerLeft,
           padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -992,7 +996,7 @@ class TableScreenState extends State<TableScreen> {
             ),
           ),
           child:
-              editingRow == row && editingKey == column.key
+              editing
                   ? Row(
                     children: [
                       Expanded(

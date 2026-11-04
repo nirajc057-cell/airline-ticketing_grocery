@@ -112,6 +112,94 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
     }
   }
 
+  Future<void> _showRowDetails(NamedTableRow row, int rowNumber) async {
+    final current = table;
+    if (current == null) return;
+    final cells = Map<String, String>.of(row.cells);
+    final hasUnsavedEdit = editingRowId == row.id && editingColumnId != null;
+    if (hasUnsavedEdit) cells[editingColumnId!] = cellEditor.text;
+    final visibleColumns =
+        current.columns
+            .where(
+              (column) =>
+                  !isSensitivePrintField(column.id) &&
+                  !isSensitivePrintField(column.label),
+            )
+            .toList();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder:
+          (sheetContext) => SafeArea(
+            child: SizedBox(
+              height: MediaQuery.sizeOf(sheetContext).height * .8,
+              width: double.infinity,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 780),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Row $rowNumber details',
+                              style:
+                                  Theme.of(
+                                    sheetContext,
+                                  ).textTheme.headlineSmall,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(current.name),
+                            if (dirty || hasUnsavedEdit)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 8),
+                                child: Text('Includes unsaved changes'),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      Expanded(
+                        child: ListView(
+                          padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+                          children: [
+                            if (visibleColumns.isEmpty)
+                              const Text('No visible fields in this row.'),
+                            for (final column in visibleColumns)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 18),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      column.label,
+                                      style:
+                                          Theme.of(
+                                            sheetContext,
+                                          ).textTheme.labelMedium,
+                                    ),
+                                    const SizedBox(height: 5),
+                                    Text(displayValue(cells[column.id])),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+    );
+  }
+
   String _newId(String prefix) =>
       '$prefix-${DateTime.now().microsecondsSinceEpoch}-${localId++}';
 
@@ -1546,6 +1634,13 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                               ),
                                               padding: EdgeInsets.zero,
                                               onSelected: (action) {
+                                                if (action == 'details') {
+                                                  _showRowDetails(
+                                                    row,
+                                                    rowOffset + index + 1,
+                                                  );
+                                                  return;
+                                                }
                                                 _selectRowForAction(row);
                                                 switch (action) {
                                                   case 'color':
@@ -1567,6 +1662,16 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                               },
                                               itemBuilder:
                                                   (_) => [
+                                                    PopupMenuItem(
+                                                      key: ValueKey(
+                                                        'row-action-details-${row.id}',
+                                                      ),
+                                                      value: 'details',
+                                                      child: const Text(
+                                                        'Row details',
+                                                      ),
+                                                    ),
+                                                    const PopupMenuDivider(),
                                                     PopupMenuItem(
                                                       key: ValueKey(
                                                         'row-action-color-${row.id}',
@@ -1633,8 +1738,21 @@ class NamedTablesScreenState extends State<NamedTablesScreen> {
                                               editingColumnId == column.id) {
                                             return;
                                           }
-                                          _startInlineEdit(row, column);
+                                          _finishInlineEdit();
+                                          setState(() {
+                                            selectedRowId = row.id;
+                                            selectedColumnId = column.id;
+                                            _selection = _TableSelection.cell;
+                                          });
                                         },
+                                        onDoubleTap:
+                                            editingRowId == row.id &&
+                                                    editingColumnId == column.id
+                                                ? null
+                                                : () => _startInlineEdit(
+                                                  row,
+                                                  column,
+                                                ),
                                         child: Container(
                                           alignment: Alignment.centerLeft,
                                           padding: const EdgeInsets.symmetric(

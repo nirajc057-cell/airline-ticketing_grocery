@@ -72,21 +72,31 @@ class _EditableApi extends ApiClient {
   }
 }
 
-Widget _editor(_EditableApi api, {ValueChanged<String>? onMessage}) =>
-    MaterialApp(
-      home: Scaffold(
-        body: NamedTablesScreen(
-          api: api,
-          grocery: false,
-          selectedTableId: 'T-3',
-          tables: const [],
-          onSelectTable: (_) {},
-          onTablesChanged: () {},
-          onOpenLinked: () {},
-          message: onMessage ?? (_) {},
-        ),
-      ),
-    );
+Widget _editor(
+  _EditableApi api, {
+  ValueChanged<String>? onMessage,
+  bool grocery = false,
+}) => MaterialApp(
+  home: Scaffold(
+    body: NamedTablesScreen(
+      api: api,
+      grocery: grocery,
+      selectedTableId: 'T-3',
+      tables: const [],
+      onSelectTable: (_) {},
+      onTablesChanged: () {},
+      onOpenLinked: () {},
+      message: onMessage ?? (_) {},
+    ),
+  ),
+);
+
+Future<void> _doubleTapCell(WidgetTester tester, Finder cell) async {
+  await tester.tap(cell);
+  await tester.pump(const Duration(milliseconds: 100));
+  await tester.tap(cell);
+  await tester.pump(const Duration(milliseconds: 400));
+}
 
 void main() {
   testWidgets('custom table row actions offer print', (tester) async {
@@ -95,6 +105,56 @@ void main() {
     await tester.tap(find.byTooltip('Row 1 actions'));
     await tester.pumpAndSettle();
     expect(find.text('Print row'), findsOneWidget);
+  });
+
+  testWidgets('row details open from the three-dot menu without saving', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _EditableApi();
+    final rows = api.table['rows'] as List;
+    (rows[0]['cells'] as Map)['C-1'] = 'First row';
+    (rows[1]['cells'] as Map)['C-1'] = 'Second row\nextra notes';
+    (api.table['columns'] as List).add({
+      'id': 'C-SECRET',
+      'label': 'Secret token',
+    });
+    (rows[1]['cells'] as Map)['C-SECRET'] = 'private-value';
+    await tester.pumpWidget(_editor(api));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byTooltip('Row 2 actions'));
+    await tester.tap(find.byTooltip('Row 2 actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('row-action-details-R-2')));
+    await tester.pumpAndSettle();
+
+    final sheet = find.byType(BottomSheet);
+    expect(sheet, findsOneWidget);
+    expect(
+      find.descendant(of: sheet, matching: find.text('Row 2 details')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: sheet,
+        matching: find.text('Second row\nextra notes'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: sheet, matching: find.text('First row')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: sheet, matching: find.text('private-value')),
+      findsNothing,
+    );
+    expect(api.lastSave, isNull);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('row delete action confirms and persists', (tester) async {
@@ -230,7 +290,7 @@ void main() {
     expect(find.byTooltip('Row 3 actions'), findsOneWidget);
   });
 
-  testWidgets('one tap types in a cell without opening a dialog', (
+  testWidgets('double tap types in a cell without opening a dialog', (
     tester,
   ) async {
     final api = _EditableApi();
@@ -238,7 +298,13 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-1')));
-    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('table-cell-editor')), findsNothing);
+    await _doubleTapCell(
+      tester,
+      find.byKey(const ValueKey('table-cell-R-1-C-1')),
+    );
     expect(find.byKey(const ValueKey('table-cell-editor')), findsOneWidget);
     expect(find.byType(AlertDialog), findsNothing);
     await tester.enterText(
@@ -248,8 +314,10 @@ void main() {
     await tester.tap(find.byTooltip('Save cell'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-2')));
-    await tester.pump();
+    await _doubleTapCell(
+      tester,
+      find.byKey(const ValueKey('table-cell-R-1-C-2')),
+    );
     await tester.enterText(
       find.byKey(const ValueKey('table-cell-editor')),
       'Second cell',
@@ -268,6 +336,23 @@ void main() {
     expect(find.text('Second cell'), findsOneWidget);
   });
 
+  testWidgets('FreshMart custom table edits only after a double tap', (
+    tester,
+  ) async {
+    final api = _EditableApi()..table['platform'] = 'grocery';
+    await tester.pumpWidget(_editor(api, grocery: true));
+    await tester.pumpAndSettle();
+
+    final cell = find.byKey(const ValueKey('table-cell-R-1-C-1'));
+    await tester.tap(cell);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('table-cell-editor')), findsNothing);
+
+    await _doubleTapCell(tester, cell);
+    expect(find.byKey(const ValueKey('table-cell-editor')), findsOneWidget);
+  });
+
   testWidgets('Enter adds a line; tick saves and cross cancels', (
     tester,
   ) async {
@@ -275,8 +360,10 @@ void main() {
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-1')));
-    await tester.pump();
+    await _doubleTapCell(
+      tester,
+      find.byKey(const ValueKey('table-cell-R-1-C-1')),
+    );
     final editor = find.byKey(const ValueKey('table-cell-editor'));
     expect(
       tester.widget<TextField>(editor).decoration!.focusedBorder,
@@ -302,15 +389,19 @@ void main() {
     final rows = api.lastSave!['rows'] as List;
     expect((rows[0] as Map)['cells']['C-1'], 'First line\nSecond line');
 
-    await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-1')));
-    await tester.pump();
+    await _doubleTapCell(
+      tester,
+      find.byKey(const ValueKey('table-cell-R-1-C-1')),
+    );
     await tester.enterText(editor, 'Discard me');
     await tester.tap(find.byTooltip('Cancel edit'));
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
     expect(
       (api.lastSave!['rows'] as List).first['cells']['C-1'],
       'First line\nSecond line',
     );
+    expect(find.byKey(const ValueKey('table-cell-editor')), findsNothing);
     expect(find.text('First line\nSecond line'), findsOneWidget);
   });
 
@@ -446,8 +537,10 @@ void main() {
     await tester.pumpWidget(_editor(api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('table-cell-R-1-C-1')));
-    await tester.pump();
+    await _doubleTapCell(
+      tester,
+      find.byKey(const ValueKey('table-cell-R-1-C-1')),
+    );
     expect(find.byKey(const ValueKey('table-cell-editor')), findsOneWidget);
     await tester.enterText(
       find.byKey(const ValueKey('table-cell-editor')),
